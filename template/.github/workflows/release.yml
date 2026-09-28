@@ -1,0 +1,21 @@
+# Publishes to PyPI when you push a tag like v0.1.0.
+# One-time setup: add this repo as a trusted publisher on PyPI
+# (https://docs.pypi.org/trusted-publishers/), with workflow "release.yml" and environment "pypi".
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --extra dev pytest
+      - run: uv build
+      - run: uv publish

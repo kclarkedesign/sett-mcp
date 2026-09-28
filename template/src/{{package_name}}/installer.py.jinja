@@ -1,0 +1,44 @@
+"""Adds this server to Claude Desktop's config file (macOS, Windows, Linux)."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+SERVER_KEY = "{{ project_slug }}"
+
+
+def config_path() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+    if sys.platform == "win32":
+        return Path(os.environ["APPDATA"]) / "Claude/claude_desktop_config.json"
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "Claude/claude_desktop_config.json"
+
+
+def server_entry(use_uvx: bool) -> dict:
+    if use_uvx:
+        command, args = "uvx", ["{{ project_slug }}"]
+    else:
+        # The interpreter running this command, so the entry keeps working from a venv.
+        command, args = sys.executable, ["-m", "{{ package_name }}"]
+    return {"command": command, "args": args, "env": {"{{ env_prefix }}_ENABLE_WRITES": "false"}}
+
+
+def install_claude_desktop(*, use_uvx: bool, dry_run: bool) -> None:
+    path = config_path()
+    config = json.loads(path.read_text()) if path.exists() else {}
+    config.setdefault("mcpServers", {})[SERVER_KEY] = server_entry(use_uvx)
+    text = json.dumps(config, indent=2)
+
+    if dry_run:
+        print(text)
+        return
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(".json.bak"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    print(f"Added '{SERVER_KEY}' to {path}. Restart Claude Desktop to load it.", file=sys.stderr)

@@ -1,0 +1,29 @@
+name: Test template
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  render-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+        license: [Apache-2.0, MIT]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Render
+        run: |
+          uvx copier copy --trust --defaults --vcs-ref HEAD \
+            --data project_name="CI Check MCP" --data license=${{ matrix.license }} \
+            . "$RUNNER_TEMP/ci-check-mcp"
+      - name: Test rendered project
+        working-directory: ${{ runner.temp }}/ci-check-mcp
+        run: uv run --extra dev pytest

@@ -1,0 +1,105 @@
+# {{ project_name }}
+
+{{ description }}
+
+Built with [Sett](https://github.com/kclarkedesign/sett-mcp) on the official MCP Python SDK v2. It is **read-only until you say otherwise**:
+
+| Guardrail | What it does |
+|---|---|
+| Write gate | Write tools aren't registered unless `{{ env_prefix }}_ENABLE_WRITES=true`, so the model never sees them. |
+| Confirmations | Destructive tools ask the user before running. Clients that can't show a prompt are refused, not waved through. |
+| Allow / deny lists | Tools the policy excludes are never registered. |
+| Field masking | Fields like `email` and `phone` are replaced with `[masked]` before results reach the model. |
+| Audit log | One JSON line per tool call, with masked arguments and the outcome. |
+| Tool hints | Every tool is marked read-only or destructive, so clients can warn users. |
+
+## Quick start
+
+```bash
+uv run --extra dev pytest                       # the guardrails, tested
+uv run {{ project_slug }} install-claude-desktop  # then restart Claude Desktop
+```
+
+For Claude Code:
+
+```bash
+claude mcp add {{ project_slug }} -- uv run --directory "$PWD" {{ project_slug }}
+```
+
+Ask Claude to "search contacts for Northwind." Emails and phone numbers come back masked.
+
+## Turning on writes
+
+Add the variable to the server's environment. In Claude Desktop's config that's the `env` block the installer created:
+
+```json
+"env": { "{{ env_prefix }}_ENABLE_WRITES": "true" }
+```
+
+The policy file can't turn writes on. That decision belongs to whoever runs the server, not to a line in the repo.
+
+## The policy
+
+The bundled policy is `src/{{ package_name }}/default_policy.yaml`. To use your own, copy it and point `{{ env_prefix }}_POLICY` at the copy:
+
+```yaml
+confirm: destructive      # destructive | all_writes | off
+tools:
+  allow: [{{ tool_prefix }}_search_contacts]   # optional: register ONLY these
+  deny: [{{ tool_prefix }}_delete_contact]     # never register these
+mask_fields: [email, phone]
+audit:
+  path: ~/.{{ project_slug }}/audit.jsonl
+```
+
+Unknown keys are an error, so a typo like `mask_feilds` fails at startup instead of silently leaking data.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `{{ env_prefix }}_ENABLE_WRITES` | Register write tools | `false` |
+| `{{ env_prefix }}_POLICY` | Path to your policy file | bundled default |
+| `{{ env_prefix }}_DATA_PATH` | Where the sample store saves changes | in memory |
+
+## Adding your own tools
+
+Tools live in `src/{{ package_name }}/tools.py`. Replace `store.py` with a client for your real system, then register functions through the guardrails:
+
+```python
+@guard.read(name="{{ tool_prefix }}_list_invoices")
+async def list_invoices(status: str = "open") -> list[dict]:
+    """List invoices by status."""  # the model reads this docstring
+    return await api.invoices(status=status)
+
+@guard.write(
+    name="{{ tool_prefix }}_void_invoice",
+    destructive=True,
+    confirm_message="Void invoice {invoice_id}? This can't be undone.",
+)
+async def void_invoice(invoice_id: str) -> dict:
+    """Void an invoice."""
+    return await api.void(invoice_id)
+```
+
+Return dicts or lists of dicts so masking can see field names.
+
+## Testing by hand
+
+```bash
+npx @modelcontextprotocol/inspector uv run {{ project_slug }}
+```
+
+Or run over HTTP with `uv run {{ project_slug }} serve --http` and point the Inspector at `http://127.0.0.1:8000/mcp`. HTTP mode has no authentication yet, so keep it on localhost.
+
+## Publishing
+
+Push a tag like `v0.1.0` and the release workflow publishes to PyPI (set up [trusted publishing](https://docs.pypi.org/trusted-publishers/) for the repo first). After that, anyone can run it with no clone and no virtualenv:
+
+```bash
+uvx {{ project_slug }}
+```
+
+## How confirmations work
+
+Destructive tools take an extra `confirmation` parameter that the SDK fills in by asking the user before the tool body runs. On the 2026-07-28 protocol the question goes back to the client as a multi-round-trip request; on older protocol versions it's a mid-call elicitation. Both are tested. If the client supports neither, the call is refused. Over HTTP the server runs stateless, which older clients can't use for prompts, so there confirmations need a 2026-07-28 client; older ones are refused. Set `confirm: off` only if something else, such as your client's own approval step, already covers it.
+
+Masking controls what the model sees. It doesn't restrict what the server can query, so give the server's own credentials only the access it needs.

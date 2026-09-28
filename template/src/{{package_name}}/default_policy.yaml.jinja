@@ -1,0 +1,22 @@
+# Default policy, bundled with the package. Point <PREFIX>_POLICY at your own copy to change it.
+#
+# Writes are NOT enabled here, on purpose: set <PREFIX>_ENABLE_WRITES=true in the
+# environment of whoever runs the server. This file rejects unknown keys.
+
+# When to ask the user before running a write tool:
+#   destructive  only tools registered with destructive=True (default)
+#   all_writes   every write tool
+#   off          never ask
+confirm: destructive
+
+tools:
+  # allow: [{{ tool_prefix }}_search_contacts]   # uncomment to register ONLY these tools
+  deny: []                              # tools that are never registered
+
+# Replaced with "[masked]" in tool results and in the audit log (case-insensitive).
+mask_fields:
+  - email
+  - phone
+
+audit:
+  path: ~/.{{ project_slug }}/audit.jsonl   # one JSON line per tool call; remove to disable

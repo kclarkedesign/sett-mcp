@@ -1,0 +1,198 @@
+"""Behavior of the safety layer, exercised through a real MCP client.
+
+Confirmation tests run against both protocol eras: 2026-07-28 (multi-round-trip
+requests) and 2025-11-25 (mid-call elicitation), since clients still speak both.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from mcp import Client
+from mcp_types import ElicitResult
+
+from {{ package_name }}.guardrails import MASK, Policy, PolicyError
+from {{ package_name }}.server import build_server
+from {{ package_name }}.store import ContactStore
+
+pytestmark = pytest.mark.anyio
+
+SEARCH = "{{ tool_prefix }}_search_contacts"
+GET = "{{ tool_prefix }}_get_contact"
+CREATE = "{{ tool_prefix }}_create_contact"
+DELETE = "{{ tool_prefix }}_delete_contact"
+PROTOCOLS = ["auto", "legacy"]  # auto negotiates 2026-07-28 with this server
+
+
+def make_server(**policy):
+    store = ContactStore([{"id": "c1", "name": "Ada", "email": "ada@example.org", "phone": "555"}])
+    return build_server(policy=Policy(**policy), store=store), store
+
+
+def answering(confirm: bool):
+    async def callback(context, params):
+        return ElicitResult(action="accept", content={"confirm": confirm})
+
+    return callback
+
+
+async def tool_names(server) -> set[str]:
+    async with Client(server) as client:
+        return {t.name for t in (await client.list_tools()).tools}
+
+
+async def test_write_tools_are_not_registered_by_default():
+    server, _ = make_server()
+    assert await tool_names(server) == {SEARCH, GET}
+
+
+async def test_write_tools_are_registered_when_writes_are_enabled():
+    server, _ = make_server(writes_enabled=True)
+    assert {CREATE, DELETE} <= await tool_names(server)
+
+
+async def test_denied_tools_are_never_registered():
+    server, _ = make_server(writes_enabled=True, deny=frozenset({DELETE}))
+    assert DELETE not in await tool_names(server)
+
+
+async def test_allow_list_registers_only_listed_tools():
+    server, _ = make_server(writes_enabled=True, allow=frozenset({SEARCH}))
+    assert await tool_names(server) == {SEARCH}
+
+
+async def test_tools_carry_read_only_and_destructive_hints():
+    server, _ = make_server(writes_enabled=True)
+    async with Client(server) as client:
+        tools = {t.name: t.annotations for t in (await client.list_tools()).tools}
+    assert tools[SEARCH].read_only_hint is True
+    assert tools[CREATE].destructive_hint is False
+    assert tools[DELETE].destructive_hint is True
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+async def test_destructive_tool_runs_after_user_confirms(mode):
+    server, store = make_server(writes_enabled=True)
+    prompts = []
+
+    async def callback(context, params):
+        prompts.append(params.message)
+        return ElicitResult(action="accept", content={"confirm": True})
+
+    async with Client(server, mode=mode, elicitation_callback=callback) as client:
+        result = await client.call_tool(DELETE, {"contact_id": "c1"})
+    assert not result.is_error
+    assert prompts == ["Permanently delete contact c1?"]
+    assert store.search("Ada", 10) == []
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+async def test_destructive_tool_does_nothing_when_user_declines(mode):
+    server, store = make_server(writes_enabled=True)
+    async with Client(server, mode=mode, elicitation_callback=answering(False)) as client:
+        result = await client.call_tool(DELETE, {"contact_id": "c1"})
+    assert result.is_error
+    assert "declined" in result.content[0].text
+    assert store.get("c1")
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+async def test_destructive_tool_is_refused_when_client_cannot_confirm(mode):
+    server, store = make_server(writes_enabled=True)
+    async with Client(server, mode=mode) as client:  # no elicitation support
+        result = await client.call_tool(DELETE, {"contact_id": "c1"})
+    assert result.is_error
+    assert "can't carry a confirmation prompt" in result.content[0].text
+    assert store.get("c1")
+
+
+async def test_confirm_off_runs_destructive_tools_without_asking():
+    server, store = make_server(writes_enabled=True, confirm="off")
+    async with Client(server) as client:
+        result = await client.call_tool(DELETE, {"contact_id": "c1"})
+    assert not result.is_error
+    assert store.search("Ada", 10) == []
+
+
+async def test_all_writes_mode_confirms_non_destructive_writes_too():
+    server, store = make_server(writes_enabled=True, confirm="all_writes")
+    async with Client(server, elicitation_callback=answering(False)) as client:
+        result = await client.call_tool(CREATE, {"name": "Bo"})
+    assert result.is_error
+    assert store.search("Bo", 10) == []
+
+
+async def test_masked_fields_never_reach_the_model():
+    server, _ = make_server(mask_fields=frozenset({"email", "phone"}))
+    async with Client(server) as client:
+        result = await client.call_tool(GET, {"contact_id": "c1"})
+    contact = result.structured_content
+    assert contact["name"] == "Ada"
+    assert contact["email"] == MASK and contact["phone"] == MASK
+    assert "ada@example.org" not in result.content[0].text
+
+
+async def test_audit_log_records_each_call_with_masked_arguments(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    server, _ = make_server(writes_enabled=True, confirm="off", mask_fields=frozenset({"email"}), audit_path=log)
+    async with Client(server) as client:
+        await client.call_tool(CREATE, {"name": "Bo", "email": "bo@example.org"})
+        await client.call_tool(GET, {"contact_id": "missing"})
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [(e["tool"], e["kind"], e["outcome"]) for e in entries] == [(CREATE, "write", "ok"), (GET, "read", "error")]
+    assert entries[0]["arguments"]["email"] == MASK
+
+
+def test_policy_file_rejects_unknown_keys():
+    with pytest.raises(PolicyError):
+        Policy.from_yaml("mask_feilds: [email]")
+
+
+def test_policy_file_cannot_enable_writes():
+    with pytest.raises(PolicyError):
+        Policy.from_yaml("writes_enabled: true")
+
+
+def test_only_the_environment_enables_writes():
+    env = {"{{ env_prefix }}_ENABLE_WRITES": "true"}
+    assert Policy.load("{{ env_prefix }}", package="{{ package_name }}", env=env).writes_enabled
+    assert not Policy.load("{{ env_prefix }}", package="{{ package_name }}", env={}).writes_enabled
+
+
+def test_bundled_default_policy_is_valid_and_read_only():
+    policy = Policy.load("{{ env_prefix }}", package="{{ package_name }}", env={})
+    assert policy.writes_enabled is False
+    assert {"email", "phone"} <= policy.mask_fields
+
+
+async def test_sync_tools_run_off_the_event_loop():
+    import threading
+
+    from mcp.server.mcpserver import MCPServer
+
+    from {{ package_name }}.guardrails import Guardrails
+
+    server = MCPServer("t")
+    guard = Guardrails(server, Policy())
+
+    @guard.read(name="where")
+    def where() -> dict:
+        return {"thread": threading.current_thread().name}
+
+    async with Client(server) as client:
+        result = await client.call_tool("where", {})
+    assert json.loads(result.content[0].text)["thread"] != threading.current_thread().name
+
+
+def test_confirm_message_with_unknown_argument_fails_at_startup():
+    from mcp.server.mcpserver import MCPServer
+
+    from {{ package_name }}.guardrails import Guardrails
+
+    guard = Guardrails(MCPServer("t"), Policy(writes_enabled=True))
+    with pytest.raises(ValueError, match="record_id"):
+
+        @guard.write(name="purge", destructive=True, confirm_message="Purge {record_id}?")
+        async def purge(contact_id: str) -> dict:
+            return {}

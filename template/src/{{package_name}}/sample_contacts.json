@@ -1,0 +1,6 @@
+[
+  {"id": "c001", "name": "Ada Park", "email": "ada@example.org", "phone": "555-0101", "company": "Northwind Schools"},
+  {"id": "c002", "name": "Luis Ortega", "email": "luis@example.org", "phone": "555-0102", "company": "Harbor Nonprofit"},
+  {"id": "c003", "name": "Mei Chen", "email": "mei@example.org", "phone": "555-0103", "company": "Northwind Schools"},
+  {"id": "c004", "name": "Sam Rivers", "email": "sam@example.org", "phone": "555-0104", "company": "Lakeside Academy"}
+]

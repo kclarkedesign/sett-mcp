@@ -1,0 +1,59 @@
+"""The tools this server exposes. Each one goes through the guardrails.
+
+To add a tool: write a function, decorate it with `guard.read(...)` or
+`guard.write(...)`, and describe it in the docstring (that's what the model reads).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from mcp.server.mcpserver.exceptions import ToolError
+
+from .guardrails import Guardrails
+from .store import ContactNotFound, ContactStore
+
+
+def register_tools(guard: Guardrails, store: ContactStore) -> None:
+    def get_or_fail(contact_id: str) -> dict[str, Any]:
+        try:
+            return store.get(contact_id)
+        except ContactNotFound:
+            raise ToolError(f"No contact with id {contact_id!r}.") from None
+
+    @guard.read(name="{{ tool_prefix }}_search_contacts")
+    async def search_contacts(query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search contacts by name, company or any other field. Returns up to `limit` matches."""
+        return store.search(query, max(1, min(limit, 100)))
+
+    @guard.read(name="{{ tool_prefix }}_get_contact")
+    async def get_contact(contact_id: str) -> dict[str, Any]:
+        """Get one contact by id."""
+        return get_or_fail(contact_id)
+
+    @guard.write(name="{{ tool_prefix }}_create_contact", destructive=False)
+    async def create_contact(
+        name: str, email: str | None = None, phone: str | None = None, company: str | None = None
+    ) -> dict[str, Any]:
+        """Create a contact."""
+        fields = {"name": name, "email": email, "phone": phone, "company": company}
+        return store.create({k: v for k, v in fields.items() if v is not None})
+
+    @guard.write(name="{{ tool_prefix }}_update_contact", destructive=False, idempotent=True)
+    async def update_contact(
+        contact_id: str, email: str | None = None, phone: str | None = None, company: str | None = None
+    ) -> dict[str, Any]:
+        """Update a contact's email, phone or company. Omitted fields are left unchanged."""
+        get_or_fail(contact_id)
+        fields = {"email": email, "phone": phone, "company": company}
+        return store.update(contact_id, {k: v for k, v in fields.items() if v is not None})
+
+    @guard.write(
+        name="{{ tool_prefix }}_delete_contact",
+        destructive=True,
+        confirm_message="Permanently delete contact {contact_id}?",
+    )
+    async def delete_contact(contact_id: str) -> dict[str, Any]:
+        """Permanently delete a contact. The user is asked to confirm first."""
+        get_or_fail(contact_id)
+        return store.delete(contact_id)

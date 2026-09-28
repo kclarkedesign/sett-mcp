@@ -1,0 +1,65 @@
+_subdirectory: template
+_templates_suffix: .jinja
+_answers_file: .copier-answers.yml
+_message_after_copy: |
+  Created {{ project_slug }}. Next:
+
+    cd {{ _copier_conf.dst_path }}
+    uv run {{ project_slug }} install-claude-desktop   # or see README for Claude Code
+    uv run --extra dev pytest
+
+  Writes are off until you set {{ env_prefix }}_ENABLE_WRITES=true.
+
+project_name:
+  type: str
+  help: Human-readable name of your MCP server
+  default: Acme MCP
+
+project_slug:
+  type: str
+  help: Package and command name (lowercase, hyphens)
+  default: "{{ project_name | lower | replace(' ', '-') }}"
+  validator: "{% if not (project_slug | regex_search('^[a-z][a-z0-9-]*$')) %}Use lowercase letters, digits and hyphens{% endif %}"
+
+package_name:
+  type: str
+  help: Python import name
+  default: "{{ project_slug | replace('-', '_') }}"
+  validator: "{% if not (package_name | regex_search('^[a-z][a-z0-9_]*$')) %}Use lowercase letters, digits and underscores{% endif %}"
+
+tool_prefix:
+  type: str
+  help: Prefix for tool names, so they don't collide with other servers' tools
+  default: "{{ package_name | replace('_mcp', '') }}"
+
+env_prefix:
+  type: str
+  help: Prefix for environment variables
+  default: "{{ package_name | upper }}"
+
+description:
+  type: str
+  help: One sentence the model reads about what this server does
+  default: "Read and manage contacts. Write tools only appear when writes are enabled."
+
+author_name:
+  type: str
+  default: Your Name
+
+author_email:
+  type: str
+  default: ""
+
+github_user:
+  type: str
+  help: GitHub user or organization that will host the repo
+  default: your-github-user
+
+copyright_year:
+  type: str
+  default: "2026"
+
+license:
+  type: str
+  choices: [Apache-2.0, MIT]
+  default: Apache-2.0
