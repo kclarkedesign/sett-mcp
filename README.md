@@ -8,7 +8,7 @@
 [![Test template](https://github.com/kclarkedesign/sett-mcp/actions/workflows/test-template.yml/badge.svg)](https://github.com/kclarkedesign/sett-mcp/actions/workflows/test-template.yml)
 
 ```bash
-uvx copier copy gh:kclarkedesign/sett-mcp my-server
+uvx sett-mcp new my-server
 ```
 
 *A sett is a badger's den, dug deep and hard to break into. Setts are also the square stones that pave a solid road.*
@@ -43,7 +43,7 @@ Plus the plumbing that usually takes an afternoon:
 ## Quick start
 
 ```bash
-uvx copier copy gh:kclarkedesign/sett-mcp my-server
+uvx sett-mcp new my-server
 cd my-server
 uv run --extra dev pytest                  # the guardrail test suite
 uv run my-server install-claude-desktop    # then restart Claude Desktop
@@ -89,8 +89,10 @@ Tried another client? Open an issue with what you saw and we'll add it to the ta
 Guardrail fixes and SDK updates land here. Pull them into any project made from the template with:
 
 ```bash
-copier update
+uvx sett-mcp update
 ```
+
+`sett-mcp` is a thin wrapper around [Copier](https://copier.readthedocs.io), so `uvx copier copy gh:kclarkedesign/sett-mcp my-server` and `copier update` work too.
 
 ## Migrating from FastMCP v1
 
