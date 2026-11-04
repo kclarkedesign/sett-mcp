@@ -9,7 +9,8 @@ four rules taken from the policy:
 3. Confirmation: destructive calls pause and ask the user first. Clients that can't
    show a prompt are refused rather than allowed through.
 4. Masking: fields such as `email` are replaced before a result reaches the model,
-   and in the audit log.
+   and in the audit log. A write that passes the "[masked]" placeholder back is
+   refused, so a model can't overwrite real data with it.
 
 Each call is also appended to a JSON Lines audit log when one is configured.
 """
@@ -152,14 +153,28 @@ def mask(value: Any, fields: frozenset[str]) -> Any:
     return value
 
 
+# An empty form: the client's own Accept button is the confirmation. (No docstring, since
+# it would become the schema description and some clients display it.)
 class Confirmation(BaseModel):
-    confirm: bool
+    pass
 
 
 class _ClientCannotConfirm(Confirmation):
     """Returned by the resolver instead of a prompt when the client has no elicitation support."""
 
-    confirm: bool = False
+
+class _NotAsked(Confirmation):
+    """Returned by the resolver when the call will be refused anyway, so the user isn't asked."""
+
+
+def _holds_mask(value: Any) -> bool:
+    if isinstance(value, str):
+        return value == MASK
+    if isinstance(value, dict):
+        return any(_holds_mask(v) for v in value.values())
+    if isinstance(value, list | tuple):
+        return any(_holds_mask(v) for v in value)
+    return False
 
 
 class Guardrails:
@@ -229,6 +244,7 @@ class Guardrails:
 
                 @functools.wraps(fn)
                 async def run(*args: Any, **kwargs: Any) -> Any:
+                    self._refuse_masked(tool, kind, kwargs)
                     return await self._call(tool, kind, fn, kwargs)
 
             annotations = ToolAnnotations(
@@ -260,6 +276,8 @@ class Guardrails:
                 raise ValueError(f"confirm_message for {tool} names unknown arguments: {sorted(unknown)}")
 
         def resolver(guardrails_ctx: Context, **arguments: Any) -> Any:
+            if _holds_mask(arguments):
+                return _NotAsked()
             capabilities = guardrails_ctx.client_capabilities
             if capabilities is None or capabilities.elicitation is None:
                 return _ClientCannotConfirm()
@@ -283,6 +301,7 @@ class Guardrails:
 
         @functools.wraps(fn)
         async def run(*args: Any, confirmation: Any, **kwargs: Any) -> Any:
+            self._refuse_masked(tool, kind, kwargs)
             if isinstance(getattr(confirmation, "data", None), _ClientCannotConfirm):
                 self._audit(tool, kind, kwargs, "blocked", 0.0)
                 raise ToolError(
@@ -290,7 +309,7 @@ class Guardrails:
                     "carry a confirmation prompt. Use a client that supports them, or set "
                     "`confirm: off` in the policy."
                 )
-            if not (isinstance(confirmation, AcceptedElicitation) and confirmation.data.confirm):
+            if not isinstance(confirmation, AcceptedElicitation):
                 self._audit(tool, kind, kwargs, "declined", 0.0)
                 raise ToolError(f"{tool} was not run: the user declined.")
             return await self._call(tool, kind, fn, kwargs)
@@ -302,6 +321,14 @@ class Guardrails:
         )
         run.__annotations__ = {**hints, "confirmation": confirmation_type}
         return run
+
+    def _refuse_masked(self, tool: str, kind: str, kwargs: dict[str, Any]) -> None:
+        if _holds_mask(kwargs):
+            self._audit(tool, kind, kwargs, "refused", 0.0)
+            raise ToolError(
+                f"{tool} was not run: an argument is the placeholder {MASK!r}, which stands in for a "
+                "hidden value. Pass only the fields you mean to change."
+            )
 
     async def _call(self, tool: str, kind: str, fn: Callable, kwargs: dict[str, Any]) -> Any:
         started = time.perf_counter()

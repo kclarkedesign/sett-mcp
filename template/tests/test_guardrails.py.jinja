@@ -21,6 +21,7 @@ pytestmark = pytest.mark.anyio
 SEARCH = "{{ tool_prefix }}_search_contacts"
 GET = "{{ tool_prefix }}_get_contact"
 CREATE = "{{ tool_prefix }}_create_contact"
+UPDATE = "{{ tool_prefix }}_update_contact"
 DELETE = "{{ tool_prefix }}_delete_contact"
 PROTOCOLS = ["auto", "legacy"]  # auto negotiates 2026-07-28 with this server
 
@@ -30,9 +31,9 @@ def make_server(**policy):
     return build_server(policy=Policy(**policy), store=store), store
 
 
-def answering(confirm: bool):
+def answering(action: str):
     async def callback(context, params):
-        return ElicitResult(action="accept", content={"confirm": confirm})
+        return ElicitResult(action=action, content={} if action == "accept" else None)
 
     return callback
 
@@ -78,7 +79,7 @@ async def test_destructive_tool_runs_after_user_confirms(mode):
 
     async def callback(context, params):
         prompts.append(params.message)
-        return ElicitResult(action="accept", content={"confirm": True})
+        return ElicitResult(action="accept", content={})
 
     async with Client(server, mode=mode, elicitation_callback=callback) as client:
         result = await client.call_tool(DELETE, {"contact_id": "c1"})
@@ -88,9 +89,10 @@ async def test_destructive_tool_runs_after_user_confirms(mode):
 
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
-async def test_destructive_tool_does_nothing_when_user_declines(mode):
+@pytest.mark.parametrize("action", ["decline", "cancel"])
+async def test_destructive_tool_does_nothing_when_user_declines(mode, action):
     server, store = make_server(writes_enabled=True)
-    async with Client(server, mode=mode, elicitation_callback=answering(False)) as client:
+    async with Client(server, mode=mode, elicitation_callback=answering(action)) as client:
         result = await client.call_tool(DELETE, {"contact_id": "c1"})
     assert result.is_error
     assert "declined" in result.content[0].text
@@ -117,10 +119,27 @@ async def test_confirm_off_runs_destructive_tools_without_asking():
 
 async def test_all_writes_mode_confirms_non_destructive_writes_too():
     server, store = make_server(writes_enabled=True, confirm="all_writes")
-    async with Client(server, elicitation_callback=answering(False)) as client:
+    async with Client(server, elicitation_callback=answering("decline")) as client:
         result = await client.call_tool(CREATE, {"name": "Bo"})
     assert result.is_error
     assert store.search("Bo", 10) == []
+
+
+@pytest.mark.parametrize("confirm", ["off", "all_writes"])
+async def test_write_with_masked_placeholder_is_refused_without_asking(confirm):
+    server, store = make_server(writes_enabled=True, confirm=confirm, mask_fields=frozenset({"email"}))
+    prompts = []
+
+    async def callback(context, params):
+        prompts.append(params.message)
+        return ElicitResult(action="accept", content={})
+
+    async with Client(server, elicitation_callback=callback) as client:
+        result = await client.call_tool(UPDATE, {"contact_id": "c1", "email": MASK, "company": "Harbor"})
+    assert result.is_error
+    assert "placeholder" in result.content[0].text
+    assert prompts == []
+    assert store.get("c1")["email"] == "ada@example.org"
 
 
 async def test_masked_fields_never_reach_the_model():

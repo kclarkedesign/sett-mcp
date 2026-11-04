@@ -26,9 +26,9 @@ Connecting an AI assistant to a real system is easy. Being comfortable leaving i
 | Guardrail | How it works |
 |---|---|
 | **Write gate** | Write tools aren't registered unless `<PREFIX>_ENABLE_WRITES=true`. The model can't call what it can't see. The policy file can't flip this; only whoever runs the server can. |
-| **Confirmations** | Destructive tools ask the user first ("Permanently delete contact c001?"), using multi-round-trip requests on the 2026-07-28 protocol and elicitation on older ones. Clients that can't show a prompt are refused, not waved through. |
+| **Confirmations** | Destructive tools ask the user first ("Permanently delete contact c001?"), using multi-round-trip requests on the 2026-07-28 protocol and elicitation on older ones. Clients that can't show a prompt are refused, not waved through. See [client support](#client-support). |
 | **Allow / deny lists** | Tools the policy excludes are never registered. |
-| **Field masking** | `email`, `phone` or any field you list becomes `[masked]` before results reach the model or the audit log. |
+| **Field masking** | `email`, `phone` or any field you list becomes `[masked]` before results reach the model or the audit log. A write that passes `[masked]` back is refused, so the placeholder can't overwrite real data. |
 | **Audit log** | One JSON line per call: tool, kind, outcome, duration, masked arguments. |
 | **Tool hints** | Every tool is marked read-only or destructive so clients can warn users. |
 | **Strict policy file** | Unknown keys fail at startup, so a typo can't silently turn masking off. |
@@ -67,6 +67,24 @@ async def void_invoice(invoice_id: str) -> dict:
     """Void an invoice."""
     return await api.void(invoice_id)
 ```
+
+## Client support
+
+Tested in November 2026 with the example server this template generates:
+
+| Client | Tools and masking | Confirmation prompts |
+|---|---|---|
+| Claude Code | ✅ | ✅ Shows an Accept / Decline prompt, including in auto mode |
+| Claude Desktop 4.x (Windows) | ✅ | ⛔ No prompt shown, so tools that need confirmation are refused and nothing changes |
+| Cursor | Not tested yet | Not tested yet |
+
+What that means in practice:
+
+- **A confirmation is only as strong as the client.** Sett can't tell a person clicking Accept from a client that accepts automatically. The write gate and the allow / deny lists don't depend on the client at all, so treat those as the hard limits.
+- **In clients without prompts,** keep the default `confirm: destructive`. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
+- **Claude may refuse on its own.** In our tests Claude sometimes declined to call a tool described as permanently deleting data, or asked in chat first. That's a welcome extra layer, but it depends on the model and the conversation, which is why the server enforces confirmation itself.
+
+Tried another client? Open an issue with what you saw and we'll add it to the table.
 
 ## Keeping generated projects current
 

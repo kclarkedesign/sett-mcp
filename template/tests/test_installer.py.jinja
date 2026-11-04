@@ -1,0 +1,31 @@
+import json
+
+from {{ package_name }} import installer
+
+
+def test_windows_updates_every_claude_desktop_install(tmp_path, monkeypatch):
+    roaming, local = tmp_path / "Roaming", tmp_path / "Local"
+    store_build = local / "Packages/Claude_abc123/LocalCache/Roaming/Claude"
+    data_dir = local / "Claude-Data/claude_abc123"
+    for d in (store_build, data_dir):
+        d.mkdir(parents=True)
+    (data_dir / "claude_desktop_config.json").write_text('{"mcpServers": {"other": {}}}')
+    monkeypatch.setattr(installer.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+
+    installer.install_claude_desktop(use_uvx=True, dry_run=False)
+
+    for d in (store_build, data_dir):
+        servers = json.loads((d / "claude_desktop_config.json").read_text())["mcpServers"]
+        assert installer.SERVER_KEY in servers
+    assert "other" in json.loads((data_dir / "claude_desktop_config.json").read_text())["mcpServers"]
+    assert (data_dir / "claude_desktop_config.json.bak").exists()
+    assert not roaming.exists()
+
+
+def test_windows_falls_back_to_appdata(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    assert installer.config_paths() == [tmp_path / "Roaming/Claude/claude_desktop_config.json"]

@@ -11,12 +11,24 @@ from pathlib import Path
 SERVER_KEY = "{{ project_slug }}"
 
 
-def config_path() -> Path:
+def config_paths() -> list[Path]:
+    """Every Claude Desktop config location that exists, or the standard one if none do.
+
+    On Windows, recent and Microsoft Store builds keep their config outside %APPDATA%,
+    so each install found is updated.
+    """
     if sys.platform == "darwin":
-        return Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+        return [Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"]
     if sys.platform == "win32":
-        return Path(os.environ["APPDATA"]) / "Claude/claude_desktop_config.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "Claude/claude_desktop_config.json"
+        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        dirs = [
+            Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming")) / "Claude",
+            *sorted(local.glob("Claude-Data/claude_*")),
+            *sorted(local.glob("Packages/Claude_*/LocalCache/Roaming/Claude")),
+        ]
+        found = [d for d in dirs if d.is_dir()]
+        return [d / "claude_desktop_config.json" for d in found or dirs[:1]]
+    return [Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "Claude/claude_desktop_config.json"]
 
 
 def server_entry(use_uvx: bool) -> dict:
@@ -29,16 +41,18 @@ def server_entry(use_uvx: bool) -> dict:
 
 
 def install_claude_desktop(*, use_uvx: bool, dry_run: bool) -> None:
-    path = config_path()
-    config = json.loads(path.read_text()) if path.exists() else {}
-    config.setdefault("mcpServers", {})[SERVER_KEY] = server_entry(use_uvx)
-    text = json.dumps(config, indent=2)
+    for path in config_paths():
+        config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        config.setdefault("mcpServers", {})[SERVER_KEY] = server_entry(use_uvx)
+        text = json.dumps(config, indent=2)
 
-    if dry_run:
-        print(text)
-        return
-    if path.exists():
-        shutil.copy2(path, path.with_suffix(".json.bak"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    print(f"Added '{SERVER_KEY}' to {path}. Restart Claude Desktop to load it.", file=sys.stderr)
+        if dry_run:
+            print(f"# {path}\n{text}")
+            continue
+        if path.exists():
+            shutil.copy2(path, path.with_suffix(".json.bak"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        print(f"Added '{SERVER_KEY}' to {path}.", file=sys.stderr)
+    if not dry_run:
+        print("Fully quit Claude Desktop (from the tray or menu bar) and reopen it to load the server.", file=sys.stderr)
