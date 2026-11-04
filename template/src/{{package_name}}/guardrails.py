@@ -141,13 +141,18 @@ def _read_policy_text(path: Path) -> str:
 
 
 def mask(value: Any, fields: frozenset[str]) -> Any:
-    """Replace the values of `fields` (case-insensitive) anywhere in a nested result."""
+    """Replace the values of `fields` (case-insensitive) anywhere in a nested result.
+
+    Empty values (None) are left alone, so "not set" doesn't read as "hidden".
+    """
     if not fields:
         return value
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
     if isinstance(value, Mapping):
-        return {k: MASK if str(k).lower() in fields else mask(v, fields) for k, v in value.items()}
+        return {
+            k: MASK if str(k).lower() in fields and v is not None else mask(v, fields) for k, v in value.items()
+        }
     if isinstance(value, list | tuple):
         return [mask(v, fields) for v in value]
     return value
@@ -284,7 +289,8 @@ class Guardrails:
             if message:
                 text = message.format(**arguments)
             else:
-                shown = ", ".join(f"{k}={v!r}" for k, v in mask(arguments, self._policy.mask_fields).items())
+                given = {k: v for k, v in arguments.items() if v is not None}  # skip unset optionals
+                shown = ", ".join(f"{k}={v!r}" for k, v in mask(given, self._policy.mask_fields).items())
                 text = f"Allow {tool}({shown})?"
             return Elicit(text, Confirmation)
 

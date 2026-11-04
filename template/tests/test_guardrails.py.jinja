@@ -142,6 +142,19 @@ async def test_write_with_masked_placeholder_is_refused_without_asking(confirm):
     assert store.get("c1")["email"] == "ada@example.org"
 
 
+async def test_generic_prompt_lists_only_the_arguments_given():
+    server, _ = make_server(writes_enabled=True, confirm="all_writes", mask_fields=frozenset({"email"}))
+    prompts = []
+
+    async def callback(context, params):
+        prompts.append(params.message)
+        return ElicitResult(action="decline")
+
+    async with Client(server, elicitation_callback=callback) as client:
+        await client.call_tool(UPDATE, {"contact_id": "c1", "company": "Harbor"})
+    assert prompts == [f"Allow {UPDATE}(contact_id='c1', company='Harbor')?"]
+
+
 async def test_masked_fields_never_reach_the_model():
     server, _ = make_server(mask_fields=frozenset({"email", "phone"}))
     async with Client(server) as client:
