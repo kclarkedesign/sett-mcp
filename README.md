@@ -1,8 +1,6 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/sett-logo-white.svg">
-    <img src="assets/sett-logo.svg" alt="Sett" width="280">
-  </picture>
+  <img src="assets/sett-logo.svg#gh-light-mode-only" alt="Sett" width="280">
+  <img src="assets/sett-logo-white.svg#gh-dark-mode-only" alt="Sett" width="280">
 </p>
 
 **Python MCP servers that are read-only until you say otherwise.** One command gives you a working server on the official MCP Python SDK v2, with guardrails that are tested and on by default.
