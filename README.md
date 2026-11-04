@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="assets/sett-logo.svg#gh-light-mode-only" alt="Sett" width="280">
-  <img src="assets/sett-logo-white.svg#gh-dark-mode-only" alt="Sett" width="280">
+  <img src="assets/sett-reveal.svg#gh-light-mode-only" alt="Sett" width="480">
+  <img src="assets/sett-reveal-white.svg#gh-dark-mode-only" alt="Sett" width="480">
 </p>
 
 **Python MCP servers that are read-only until you say otherwise.** One command gives you a working server on the official MCP Python SDK v2, with guardrails that are tested and on by default.
@@ -114,4 +114,4 @@ cd /tmp/check && uv run --extra dev pytest
 
 ## License
 
-Apache-2.0. Projects you generate can choose Apache-2.0 or MIT. Logo and icon files are in `assets/`.
+Apache-2.0. Projects you generate can choose Apache-2.0 or MIT. Logo and icon files are in `assets/`, including an animated reveal and a looping loading mark (rebuild them with `node scripts/build_motion.mjs`).
