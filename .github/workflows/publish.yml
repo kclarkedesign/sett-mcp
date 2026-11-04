@@ -1,0 +1,24 @@
+# Publishes the `sett-mcp` command to PyPI.
+# Runs when a GitHub release is published, or by hand from the Actions tab ("Run workflow").
+# PyPI trusts this workflow directly (trusted publishing), so no API token is stored anywhere.
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --extra dev pytest
+      - run: uv build
+      - run: uv publish

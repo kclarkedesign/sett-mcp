@@ -1,0 +1,47 @@
+# The `sett-mcp` command: a thin wrapper around Copier for this repo's template.
+# The template itself lives in template/ and is not part of this package.
+[project]
+name = "sett-mcp"
+dynamic = ["version"]
+description = "Create safe-by-default Python MCP servers: read-only until you say otherwise."
+readme = "docs/pypi.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Kirk Clarke" }]
+keywords = ["mcp", "model-context-protocol", "copier-template", "guardrails", "ai-safety", "claude"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Code Generators",
+]
+dependencies = ["copier>=9.4,<10"]
+
+[project.scripts]
+sett-mcp = "sett_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kclarkedesign/sett-mcp"
+Source = "https://github.com/kclarkedesign/sett-mcp"
+Issues = "https://github.com/kclarkedesign/sett-mcp/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/sett_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sett_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/sett_mcp", "/tests", "/docs/pypi.md", "/LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
