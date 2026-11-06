@@ -13,7 +13,10 @@ uvx sett-mcp new my-server
 
 *A sett is a badger's den, dug deep and hard to break into. Setts are also the square stones that pave a solid road.*
 
-<!-- demo GIF: Claude searching contacts (masked), then a delete that asks for confirmation -->
+<p align="center">
+  <img src="assets/demo.gif" alt="Claude Code searches contacts and gets email and phone back as [masked], then a delete pauses on a confirmation prompt and the user declines" width="726">
+</p>
+<p align="center"><sub>The example server in Claude Code: email and phone come back masked, and a delete waits for your answer.</sub></p>
 
 ## Why
 
