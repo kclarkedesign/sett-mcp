@@ -93,7 +93,7 @@ def http_app(server: MCPServer, host: str = "127.0.0.1", remote: RemoteSettings 
         security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=[pattern for h in remote.allowed_hosts for pattern in (h, f"{h}:*")],
-            allowed_origins=[f"https://{h}" for h in remote.allowed_hosts],
+            allowed_origins=list(remote.allowed_origins),
         )
     app = server.streamable_http_app(
         stateless_http=True, json_response=True, host=host, transport_security=security

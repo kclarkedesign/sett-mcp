@@ -81,6 +81,13 @@ class RemoteSettings:
         """The URL clients connect to, and the audience every token must carry."""
         return self.public_url.rstrip("/") + "/mcp"
 
+    @property
+    def allowed_origins(self) -> tuple[str, ...]:
+        """Browser origins to accept: the public URL as written, plus https on extra hosts."""
+        public = urlsplit(self.public_url)
+        own = f"{public.scheme}://{public.netloc}"
+        return (own, *(f"https://{h}" for h in self.allowed_hosts if h != public.netloc))
+
     @classmethod
     def from_env(cls, prefix: str, env: Mapping[str, str]) -> RemoteSettings | None:
         """Read remote settings, or return None when no authorization server is configured."""
@@ -201,17 +208,12 @@ class SupabaseAuditSink:
 
     async def write(self, entry: dict[str, Any]) -> None:
         body = json.dumps(entry, default=str).encode()
-        request = urllib.request.Request(
-            self._url,
-            data=body,
-            method="POST",
-            headers={
-                "apikey": self._key,
-                "Authorization": f"Bearer {self._key}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-        )
+        headers = {"apikey": self._key, "Content-Type": "application/json", "Prefer": "return=minimal"}
+        # Only the legacy service_role key is a JWT. The current `sb_secret_...` keys are
+        # opaque and belong in `apikey` alone: sent as a bearer token they fail as "Invalid JWT".
+        if self._key.count(".") == 2:
+            headers["Authorization"] = f"Bearer {self._key}"
+        request = urllib.request.Request(self._url, data=body, method="POST", headers=headers)
 
         def send() -> None:
             with urllib.request.urlopen(request, timeout=self._timeout):  # noqa: S310 (https URL from config)

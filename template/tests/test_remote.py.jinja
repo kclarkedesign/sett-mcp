@@ -116,6 +116,13 @@ def test_supabase_url_sets_issuer_keys_and_audit_table(settings):
     assert settings.audit_url == "https://ref.supabase.co"
 
 
+def test_allowed_origins_keep_the_public_urls_scheme():
+    local = RemoteSettings.from_env(PREFIX, {**ENV, f"{PREFIX}_PUBLIC_URL": "http://localhost:8000"})
+    extra = RemoteSettings.from_env(PREFIX, {**ENV, f"{PREFIX}_ALLOWED_HOSTS": "mcp.acme.dev"})
+    assert local.allowed_origins == ("http://localhost:8000",)
+    assert extra.allowed_origins == ("https://mcp.example.com", "https://mcp.acme.dev")
+
+
 def test_public_url_falls_back_to_vercels_production_url():
     env = {k: v for k, v in ENV.items() if not k.endswith("_PUBLIC_URL")}
     settings = RemoteSettings.from_env(PREFIX, {**env, "VERCEL_PROJECT_PRODUCTION_URL": "srv.vercel.app"})
@@ -241,3 +248,32 @@ def test_audit_entries_name_the_signed_in_user(settings, capfd):
     assert entry["outcome"] == "ok"
     assert entry["subject"] == "user-1"
     assert entry["client_id"] == "client-1"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("key", "bearer"),
+    [("sb_secret_abc123", False), ("eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig", True)],
+    ids=["secret key", "legacy service_role JWT"],
+)
+async def test_supabase_audit_sends_opaque_secret_keys_only_as_apikey(monkeypatch, key, bearer):
+    sent = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        sent.append(request)
+        return Response()
+
+    monkeypatch.setattr(remote_module.urllib.request, "urlopen", fake_urlopen)
+    await remote_module.SupabaseAuditSink("https://ref.supabase.co", key).write({"tool": "t", "outcome": "ok"})
+    (request,) = sent
+    assert request.full_url == "https://ref.supabase.co/rest/v1/sett_audit"
+    assert request.get_header("Apikey") == key
+    assert (request.get_header("Authorization") == f"Bearer {key}") is bearer
+    assert json.loads(request.data) == {"tool": "t", "outcome": "ok"}
