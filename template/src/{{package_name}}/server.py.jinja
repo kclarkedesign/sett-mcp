@@ -119,6 +119,12 @@ def http_app(server: MCPServer, host: str = "127.0.0.1", remote: RemoteSettings 
             await send({"type": "http.response.body", "body": not_allowed})
             return
         if consent_page and scope["type"] == "http" and scope["path"].rstrip("/") == consent.PATH:
+            if not _host_allowed(scope, remote):
+                # The page builds its sign-in return address from the host, so only serve it
+                # on this server's own hosts, as the SDK does for /mcp.
+                await send({"type": "http.response.start", "status": 421, "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"Misdirected request"})
+                return
             if scope["method"] in ("GET", "HEAD"):
                 body, headers = consent.render(*consent_page)
                 await send({"type": "http.response.start", "status": 200, "headers": headers})
@@ -130,6 +136,13 @@ def http_app(server: MCPServer, host: str = "127.0.0.1", remote: RemoteSettings 
         await app(scope, receive, send)
 
     return asgi
+
+
+def _host_allowed(scope: dict, remote: RemoteSettings | None) -> bool:
+    if remote is None:
+        return False
+    host = next((v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"host"), "").lower()
+    return host in remote.allowed_hosts or host.rsplit(":", 1)[0] in remote.allowed_hosts
 
 
 def create_app(env: Mapping[str, str] = os.environ) -> Any:

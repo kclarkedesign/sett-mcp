@@ -129,11 +129,9 @@ class Supabase:
     def create_secret_key(self) -> dict[str, Any]:
         return self._api("POST", "/api-keys?reveal=true", {"type": "secret", "name": "sett_server"})
 
-    def sql(self, query: str, parameters: list[Any] | None = None) -> list[dict[str, Any]]:
-        body: dict[str, Any] = {"query": query}
-        if parameters is not None:
-            body["parameters"] = parameters
-        return self._api("POST", "/database/query", body) or []
+    def sql(self, query: str) -> list[dict[str, Any]]:
+        """Run fixed SQL (the deploy's own statements; never user input)."""
+        return self._api("POST", "/database/query", {"query": query}) or []
 
     def auth_config(self) -> dict[str, Any]:
         return self._api("GET", "/config/auth")
@@ -148,20 +146,47 @@ class Supabase:
             raise DeployError(f"Couldn't read {self.url}'s signing keys (HTTP {status})")
         return json.loads(raw).get("keys", [])
 
-    def create_user(self, secret_key: str, email: str, app_metadata: dict[str, Any]) -> bool:
-        """Add a confirmed user. False if one with that email already exists."""
-        body = json.dumps({"email": email, "email_confirm": True, "app_metadata": app_metadata}).encode()
+    def _admin(self, method: str, path: str, secret_key: str, body: Any = None) -> tuple[int, Any]:
         headers = {"apikey": secret_key, "Content-Type": "application/json"}
         if secret_key.count(".") == 2:
             # A legacy service_role key is a JWT, and Auth's admin API reads it as a bearer
             # token. The current `sb_secret_...` keys are opaque and go in `apikey` alone.
             headers["Authorization"] = f"Bearer {secret_key}"
-        status, raw = self._request("POST", f"{self.url}/auth/v1/admin/users", headers, body)
-        if status == 422 and b"exists" in raw:
+        data = None if body is None else json.dumps(body).encode()
+        status, raw = self._request(method, f"{self.url}/auth/v1/admin{path}", headers, data)
+        try:
+            return status, json.loads(raw) if raw.strip() else None
+        except ValueError:
+            return status, raw.decode(errors="replace")
+
+    def create_user(self, secret_key: str, email: str, app_metadata: dict[str, Any]) -> bool:
+        """Add a confirmed user. False if one with that email already exists."""
+        body = {"email": email, "email_confirm": True, "app_metadata": app_metadata}
+        status, data = self._admin("POST", "/users", secret_key, body)
+        if status == 422 and "exists" in json.dumps(data):
             return False
         if status >= 400:
-            raise DeployError(f"Couldn't add {email}: HTTP {status} {raw.decode(errors='replace')[:200]}")
+            raise DeployError(f"Couldn't add {email}: HTTP {status} {str(data)[:200]}")
         return True
+
+    def users(self, secret_key: str) -> list[dict[str, Any]]:
+        """Everyone who can sign in, through Auth's admin API (paged)."""
+        found: list[dict[str, Any]] = []
+        for page in range(1, 1000):
+            status, data = self._admin("GET", f"/users?page={page}&per_page=200", secret_key)
+            if status >= 400:
+                raise DeployError(f"Couldn't list users: HTTP {status} {str(data)[:200]}")
+            batch = (data or {}).get("users", [])
+            found += batch
+            if len(batch) < 200:
+                break
+        return found
+
+    def update_app_metadata(self, secret_key: str, user_id: str, changes: dict[str, Any]) -> None:
+        """Merge keys into a user's app_metadata; a None value removes that key."""
+        status, data = self._admin("PUT", f"/users/{user_id}", secret_key, {"app_metadata": changes})
+        if status >= 400:
+            raise DeployError(f"Couldn't update the user: HTTP {status} {str(data)[:200]}")
 
 
 class Vercel:
@@ -230,12 +255,16 @@ class Vercel:
         return [a.removeprefix("https://") for a in data.get("aliases", []) if isinstance(a, str)]
 
 
-def production_host(aliases: list[str], project: str) -> str:
-    """The address Vercel gives production: the shortest custom domain, else the shortest vercel.app one."""
+def production_hosts(aliases: list[str], project: str) -> list[str]:
+    """Where production may answer, most likely first: custom domains, then vercel.app ones.
+
+    The server only answers on its production domain (other hosts get 421), so the deploy
+    tries these in order and uses the first that answers.
+    """
     stable = [a for a in aliases if "-git-" not in a]
     custom = sorted((a for a in stable if not a.endswith(".vercel.app")), key=len)
     hosted = sorted((a for a in stable if a.endswith(".vercel.app")), key=len)
-    return (custom or hosted or [f"{project}.vercel.app"])[0]
+    return custom + hosted or [f"{project}.vercel.app"]
 
 
 def hook_sql(resource_url: str) -> str:
@@ -374,13 +403,14 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
 
     say("4/7 Deploying to production (this takes a minute)")
     deployment = vercel.deploy()
-    host = production_host(vercel.aliases(deployment), options.vercel_project)
-    resource = _resource_url(f"https://{host}", request, options.sleep)
+    hosts = production_hosts(vercel.aliases(deployment), options.vercel_project)
+    resource = _resource_url([f"https://{h}" for h in hosts], request, options.sleep)
     public = resource.removesuffix("/mcp")
     say(f"    live at {public}")
 
     site_url = (auth.get("site_url") or "").rstrip("/")
-    if site_url not in ("", "http://localhost:3000", public) and not options.yes:
+    ours = {"", "http://localhost:3000", public, load_state(options.cwd).get("url", "")}  # earlier deploys
+    if site_url not in ours and not options.yes:
         raise DeployError(
             f"This Supabase project's Site URL is {site_url}. The deploy points it at {public}, which "
             "would break sign-in for anything else using the project. Use a project just for this "
@@ -438,22 +468,23 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     return resource
 
 
-def _resource_url(public: str, request: Request, sleep: Callable[[float], None], attempts: int = 10) -> str:
+def _resource_url(candidates: list[str], request: Request, sleep: Callable[[float], None], attempts: int = 10) -> str:
     """Ask the running server which URL it answers for (its protected-resource metadata)."""
-    url = f"{public}/.well-known/oauth-protected-resource/mcp"
-    status, raw = 0, b""
+    status = 0
     for _ in range(attempts):
-        status, raw = request("GET", url, {}, None)
-        if status == 200:
-            resource = json.loads(raw).get("resource", "")
-            if not resource.endswith("/mcp"):
-                raise DeployError(f"The server reported an unexpected address: {resource}")
-            return resource
+        for public in candidates:
+            status, raw = request("GET", f"{public}/.well-known/oauth-protected-resource/mcp", {}, None)
+            if status == 200:
+                resource = json.loads(raw).get("resource", "")
+                if not resource.endswith("/mcp"):
+                    raise DeployError(f"The server reported an unexpected address: {resource}")
+                return resource
         sleep(3)
+    first = candidates[0]
     raise DeployError(
-        f"The server at {public} didn't come up (HTTP {status}). A 404 usually means Vercel didn't run the "
+        f"The server at {first} didn't come up (HTTP {status}). A 404 usually means Vercel didn't run the "
         "app as Python: check that vercel.json (\"framework\": \"python\") and asgi.py are in this folder. "
-        f"Otherwise run `vercel logs {urlsplit(public).netloc}`; a missing setting is reported there."
+        f"Otherwise run `vercel logs --deployment {urlsplit(first).netloc}`; a missing setting is reported there."
     )
 
 
@@ -468,26 +499,6 @@ def _check_server(public: str, request: Request) -> None:
 
 # --- users ------------------------------------------------------------------------------
 
-LIST_USERS = f"""
-select email, raw_app_meta_data->>'{ROLE_KEY}' as role, last_sign_in_at
-from auth.users order by created_at
-""".strip()
-
-SET_ROLE = f"""
-update auth.users
-set raw_app_meta_data = coalesce(raw_app_meta_data, '{{}}'::jsonb) || jsonb_build_object('{ROLE_KEY}', $2::text)
-where lower(email) = lower($1)
-returning email
-""".strip()
-
-CLEAR_ROLE = f"""
-update auth.users
-set raw_app_meta_data = coalesce(raw_app_meta_data, '{{}}'::jsonb) - '{ROLE_KEY}'
-where lower(email) = lower($1)
-returning email
-""".strip()
-
-
 def add_user(supabase: Supabase, email: str, writer: bool, say: Callable[[str], None] = print) -> None:
     created = supabase.create_user(secret_key(supabase), email, {ROLE_KEY: WRITER} if writer else {})
     if created:
@@ -499,9 +510,12 @@ def add_user(supabase: Supabase, email: str, writer: bool, say: Callable[[str], 
 
 
 def set_writer(supabase: Supabase, email: str, writer: bool, say: Callable[[str], None] = print) -> None:
-    rows = supabase.sql(SET_ROLE, [email, WRITER]) if writer else supabase.sql(CLEAR_ROLE, [email])
-    if not rows:
+    """Give or take the writer role, through Auth's admin API (no SQL, so no quoting to get wrong)."""
+    key = secret_key(supabase)
+    match = [u for u in supabase.users(key) if (u.get("email") or "").lower() == email.strip().lower()]
+    if not match:
         raise DeployError(f"No user with the email {email}. Add them first: users add {email}")
+    supabase.update_app_metadata(key, match[0]["id"], {ROLE_KEY: WRITER if writer else None})
     say(
         f"{email} is now a {'writer' if writer else 'reader'}. It applies when their client next refreshes "
         "its sign-in (within an hour), or right away if they sign in again."
@@ -509,13 +523,14 @@ def set_writer(supabase: Supabase, email: str, writer: bool, say: Callable[[str]
 
 
 def list_users(supabase: Supabase, say: Callable[[str], None] = print) -> None:
-    rows = supabase.sql(LIST_USERS)
-    if not rows:
+    users = supabase.users(secret_key(supabase))
+    if not users:
         say("No users yet. Add one: users add you@example.com --writer")
         return
-    for row in rows:
-        seen = row.get("last_sign_in_at") or "never signed in"
-        say(f"{row.get('email')}  {row.get('role') or 'reader'}  {seen}")
+    for user in users:
+        role = (user.get("app_metadata") or {}).get(ROLE_KEY) or "reader"
+        seen = user.get("last_sign_in_at") or "never signed in"
+        say(f"{user.get('email')}  {role}  {seen}")
 
 
 def supabase_for(cwd: Path, given: str | None, env: Mapping[str, str] = os.environ) -> Supabase:

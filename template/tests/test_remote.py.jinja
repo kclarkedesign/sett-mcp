@@ -350,6 +350,13 @@ def test_consent_page_is_served_with_strict_headers():
     assert posted.status_code == 405
 
 
+def test_consent_page_is_only_served_on_this_servers_host():
+    settings = RemoteSettings.from_env(PREFIX, {**ENV, f"{PREFIX}_SUPABASE_PUBLISHABLE_KEY": "key"})
+    with TestClient(app_for(settings, new_store()), base_url="https://mcp.example.com") as client:
+        assert client.get("/oauth/consent", headers={"host": "evil.example"}).status_code == 421
+        assert client.get("/oauth/consent", headers={"host": "MCP.example.com:443"}).status_code == 200
+
+
 def test_consent_page_needs_a_publishable_key(settings):
     with TestClient(app_for(settings, new_store()), base_url="https://mcp.example.com") as client:
         assert client.get("/oauth/consent").status_code == 404

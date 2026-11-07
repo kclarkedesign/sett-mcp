@@ -51,27 +51,35 @@ class FakeSupabase:
                 self.auth |= data
             return 200, json.dumps(self.auth).encode()
         if url == f"{api}/database/query":
-            return 201, json.dumps(self._sql(data)).encode()
+            return 201, b"[]"
         if url == f"https://{REF}.supabase.co/auth/v1/.well-known/jwks.json":
             return 200, json.dumps({"keys": self.signing}).encode()
-        if url == f"https://{REF}.supabase.co/auth/v1/admin/users":
+        admin = f"https://{REF}.supabase.co/auth/v1/admin/users"
+        if url == admin and method == "POST":
             if data["email"].lower() in self.users:
                 return 422, b'{"code":"email_exists"}'
             self.users[data["email"].lower()] = data["app_metadata"]
             return 200, b"{}"
+        if url.startswith(admin + "?") and method == "GET":
+            users = [{"id": f"id-{e}", "email": e, "app_metadata": m} for e, m in self.users.items()]
+            return 200, json.dumps({"users": users}).encode()
+        if url.startswith(admin + "/id-") and method == "PUT":
+            email = url.removeprefix(admin + "/id-")
+            for key, value in data["app_metadata"].items():
+                if value is None:
+                    self.users[email].pop(key, None)
+                else:
+                    self.users[email][key] = value
+            return 200, b"{}"
         if url == f"https://{HOST}/.well-known/oauth-protected-resource/mcp":
             return 200, json.dumps({"resource": RESOURCE}).encode()
+        if url.endswith("/.well-known/oauth-protected-resource/mcp"):
+            return 421, b"Misdirected Request"  # the server answers only on its production host
         if url == f"https://{HOST}/mcp":
             return self.server_status, b""
         if url == f"https://{HOST}/oauth/consent":
             return 200, b"<html>"
         return 404, b"not found"
-
-    def _sql(self, data):
-        params = data.get("parameters") or []
-        if params and params[0].lower() in self.users:
-            return [{"email": params[0]}]
-        return []
 
     def sent(self, method, suffix):
         return [c for c in self.calls if c[0] == method and c[1].endswith(suffix)]
@@ -222,11 +230,29 @@ def test_an_open_server_is_not_reported_as_done(run, tmp_path):
     assert not (tmp_path / deploy.STATE_FILE).exists()
 
 
-def test_production_host_prefers_the_stable_address():
+def test_production_hosts_are_tried_custom_domains_first():
     aliases = ["app-abc123-team.vercel.app", "app-git-main-team.vercel.app", "app.vercel.app"]
-    assert deploy.production_host(aliases, "app") == "app.vercel.app"
-    assert deploy.production_host([*aliases, "mcp.example.com"], "app") == "mcp.example.com"
-    assert deploy.production_host([], "app") == "app.vercel.app"
+    assert deploy.production_hosts(aliases, "app") == ["app.vercel.app", "app-abc123-team.vercel.app"]
+    assert deploy.production_hosts([*aliases, "mcp.example.com"], "app")[0] == "mcp.example.com"
+    assert deploy.production_hosts([], "app") == ["app.vercel.app"]
+
+
+def test_the_host_that_answers_is_used_when_several_custom_domains_exist(run):
+    class TwoDomains(FakeVercel):
+        def __call__(self, argv, stdin):
+            if argv[1] == "inspect":
+                self.commands.append(argv)
+                return 0, json.dumps({"aliases": ["a.example", HOST]}), ""
+            return super().__call__(argv, stdin)
+
+    url, supabase, _ = run(vercel=TwoDomains())
+    assert url == RESOURCE  # a.example answered 421, so the production host was used
+
+
+def test_a_site_url_from_an_earlier_deploy_is_ours(run, tmp_path):
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server", "url": "https://old.example"})
+    _, supabase, _ = run(supabase=FakeSupabase(site_url="https://old.example"))
+    assert supabase.sent("PATCH", "/config/auth")[0][3]["site_url"] == f"https://{HOST}"
 
 
 def test_hook_sql_refuses_odd_addresses():
@@ -244,7 +270,7 @@ def test_project_ref_accepts_urls(value):
     assert deploy.project_ref(value) == REF
 
 
-def test_users_add_grant_revoke():
+def test_users_add_grant_revoke_list():
     supabase = FakeSupabase()
     api = Supabase("token", REF, supabase)
     said = []
@@ -253,10 +279,15 @@ def test_users_add_grant_revoke():
     created = supabase.sent("POST", "/auth/v1/admin/users")[0]
     assert created[2]["apikey"] == "sb_secret_y" and "Authorization" not in created[2]
 
-    deploy.set_writer(api, "Ada@Example.org", False, say=said.append)
-    query = supabase.sent("POST", "/database/query")[-1][3]
-    assert query["parameters"] == ["Ada@Example.org"]  # passed as a parameter, never pasted into SQL
-    assert "$1" in query["query"]
+    deploy.set_writer(api, "Ada@Example.org", False, say=said.append)  # emails match without case
+    assert supabase.users["ada@example.org"] == {}
+    assert supabase.sent("PUT", "/admin/users/id-ada@example.org")[0][3] == {"app_metadata": {"sett_role": None}}
+    deploy.set_writer(api, "ada@example.org", True, say=said.append)
+    assert supabase.users["ada@example.org"] == {"sett_role": "writer"}
+    assert not supabase.sent("POST", "/database/query")  # roles never go through SQL
+
+    deploy.list_users(api, say=said.append)
+    assert said[-1].startswith("ada@example.org  writer")
 
     with pytest.raises(DeployError, match="Add them first"):
         deploy.set_writer(api, "nobody@example.org", True, say=said.append)
@@ -265,7 +296,7 @@ def test_users_add_grant_revoke():
 def test_adding_an_existing_user_as_writer_grants_the_role():
     supabase = FakeSupabase(users=["ada@example.org"])
     deploy.add_user(Supabase("token", REF, supabase), "ada@example.org", writer=True, say=lambda _: None)
-    assert supabase.sent("POST", "/database/query")[-1][3]["parameters"] == ["ada@example.org", "writer"]
+    assert supabase.users["ada@example.org"] == {"sett_role": "writer"}
 
 
 def test_bad_token_says_so():

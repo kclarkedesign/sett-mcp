@@ -106,9 +106,11 @@ _PAGE = """<!doctype html>
   <section id="signin" hidden>
     <h1>Sign in to <span data-name></span></h1>
     <p>An app is asking to use <span data-name></span> for you. Sign in first.</p>
-    <button class="primary" id="github" type="button">Continue with GitHub</button>
-    <hr>
-    <label class="note" for="email">Or get a sign-in link by email (for people already added)</label>
+    <div id="github-option" hidden>
+      <button class="primary" id="github" type="button">Continue with GitHub</button>
+      <hr>
+    </div>
+    <label class="note" for="email">Get a sign-in link by email (for people already added)</label>
     <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
     <div class="row"><button id="send" type="button">Email me a link</button></div>
     <p class="note" id="sent" hidden>Check your email and open the link in this browser.</p>
@@ -155,7 +157,15 @@ _PAGE = """<!doctype html>
 
   const sb = window.supabase.createClient(config.url, config.key, { auth: { flowType: "pkce" } });
 
-  $("github").onclick = () => sb.auth.signInWithOAuth({ provider: "github", options: { redirectTo: returnHere } });
+  $("github").onclick = async () => {
+    const { error } = await sb.auth.signInWithOAuth({ provider: "github", options: { redirectTo: returnHere } });
+    if (error) fail("Couldn't start GitHub sign-in: " + error.message);
+  };
+  // Offer GitHub only once it's set up (the deploy's --github-client-id).
+  fetch(config.url + "/auth/v1/settings", { headers: { apikey: config.key } })
+    .then((r) => (r.ok ? r.json() : {}))
+    .then((s) => { if (s.external && s.external.github) $("github-option").hidden = false; })
+    .catch(() => {});
   $("send").onclick = async () => {
     const email = $("email").value.trim();
     if (!email) return;
