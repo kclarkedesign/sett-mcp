@@ -259,7 +259,9 @@ class Vercel:
         self._vercel("link", "--yes", "--project", project)
 
     def env_names(self) -> set[str]:
-        out = self._vercel("env", "ls", "production", check=False)
+        # Fails loudly: an empty answer from a failed lookup would look like "nothing set
+        # yet" and replace the shared key.
+        out = self._vercel("env", "ls", "production")
         return set(re.findall(r"\b[A-Z][A-Z0-9_]+\b", out))
 
     def set_env(self, name: str, value: str) -> None:
@@ -429,12 +431,9 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     if f"{prefix}_REQUEST_STATE_KEY" not in existing:
         # Kept across deploys: replacing it would void confirmations in progress.
         settings[f"{prefix}_REQUEST_STATE_KEY"] = secrets.token_urlsafe(48)
-    if options.enable_writes:
-        settings[f"{prefix}_ENABLE_WRITES"] = "true"
-    elif f"{prefix}_ENABLE_WRITES" in existing:
-        # Each deploy states the write gate: without --writes it is closed, even if an
-        # earlier deploy opened it.
-        settings[f"{prefix}_ENABLE_WRITES"] = "false"
+    # Set on every deploy, so the write gate is always what this run says: on with
+    # --writes, off without it, whatever an earlier deploy did.
+    settings[f"{prefix}_ENABLE_WRITES"] = "true" if options.enable_writes else "false"
     for name, value in settings.items():
         vercel.set_env(name, value)
         say(f"    set {name}")
@@ -499,10 +498,15 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
 
 def _resource_url(candidates: list[str], request: Request, sleep: Callable[[float], None], attempts: int = 10) -> str:
     """Ask the running server which URL it answers for (its protected-resource metadata)."""
-    status = 0
+    last = "no answer"
     for _ in range(attempts):
         for public in candidates:
-            status, raw = request("GET", f"{public}/.well-known/oauth-protected-resource/mcp", {}, None)
+            try:
+                status, raw = request("GET", f"{public}/.well-known/oauth-protected-resource/mcp", {}, None)
+            except DeployError as exc:  # DNS or TLS not ready yet (a new domain), or a blip
+                last = str(exc)
+                continue
+            last = f"HTTP {status}"
             if status == 200:
                 resource = json.loads(raw).get("resource", "")
                 if not resource.endswith("/mcp"):
@@ -511,7 +515,7 @@ def _resource_url(candidates: list[str], request: Request, sleep: Callable[[floa
         sleep(3)
     first = candidates[0]
     raise DeployError(
-        f"The server at {first} didn't come up (HTTP {status}). A 404 usually means Vercel didn't run the "
+        f"The server at {first} didn't come up (last: {last}). A 404 usually means Vercel didn't run the "
         "app as Python: check that vercel.json (\"framework\": \"python\") and asgi.py are in this folder. "
         f"Otherwise run `vercel logs --deployment {urlsplit(first).netloc}`; a missing setting is reported there."
     )
