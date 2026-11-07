@@ -9,6 +9,7 @@ MCP server on the official Python SDK v2 (`mcp>=2.2`, `MCPServer`, not v1's `Fas
 - `src/{{ package_name }}/default_policy.yaml`: bundled policy.
 - `tests/test_guardrails.py`: behavior tests through a real MCP client.
 - `tests/test_http.py`: HTTP mode edge cases and the SDK's Origin and Host checks.
+- `src/{{ package_name }}/remote.py` + `tests/test_remote.py`: remote mode (sign-in, the writer role, shared confirmation key, audit sinks). Never weaken a token check or let a claim enable writes on its own; `docs/remote.md` describes the rules.
 - `Dockerfile`, `glama.json`, `docs/publishing.md`: publishing to PyPI, Glama and the MCP Registry.
 
 ## Rules

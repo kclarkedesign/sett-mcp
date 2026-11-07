@@ -1,0 +1,243 @@
+"""Remote mode: sign-in, the writer role, shared confirmations and the audit sinks.
+
+Tokens are signed with a key made for each test run; the server checks them against
+that key instead of fetching an issuer's published keys.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+import jwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
+from starlette.testclient import TestClient
+
+from {{ package_name }} import remote as remote_module
+from {{ package_name }}.guardrails import Policy
+from {{ package_name }}.remote import JWTVerifier, RemoteConfigError, RemoteSettings
+from {{ package_name }}.server import build_server, create_app, http_app
+from {{ package_name }}.store import ContactStore
+
+PREFIX = "{{ env_prefix }}"
+UPDATE = "{{ tool_prefix }}_update_contact"
+ENV = {
+    f"{PREFIX}_SUPABASE_URL": "https://ref.supabase.co",
+    f"{PREFIX}_PUBLIC_URL": "https://mcp.example.com",
+    f"{PREFIX}_REQUEST_STATE_KEY": "a" * 32,
+}
+HEADERS = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+KEY = ec.generate_private_key(ec.SECP256R1())
+OTHER_KEY = ec.generate_private_key(ec.SECP256R1())
+
+
+class FakeKeys:
+    """Stands in for the issuer's published keys (PyJWKClient)."""
+
+    def __init__(self, *args, **kwargs):
+        jwk = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(KEY.public_key()))
+        self._jwk = jwt.PyJWK.from_dict({**jwk, "kid": "test", "alg": "ES256"})
+
+    def get_signing_key_from_jwt(self, token):
+        return self._jwk
+
+
+@pytest.fixture(autouse=True)
+def test_keys(monkeypatch):
+    monkeypatch.setattr(remote_module.jwt, "PyJWKClient", FakeKeys)
+
+
+@pytest.fixture
+def settings():
+    return RemoteSettings.from_env(PREFIX, ENV)
+
+
+def token(settings, role=None, key=KEY, **overrides):
+    claims = {
+        "iss": settings.issuer,
+        "aud": settings.resource_url,
+        "sub": "user-1",
+        "client_id": "client-1",
+        "exp": int(time.time()) + 300,
+        "app_metadata": {"sett_role": role} if role else {},
+        **overrides,
+    }
+    return jwt.encode(claims, key, algorithm="ES256", headers={"kid": "test"})
+
+
+def envelope(capabilities=None):
+    """The per-request `_meta` the 2026-07-28 protocol carries instead of a handshake."""
+    return {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": capabilities or {},
+        "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1"},
+    }
+
+
+def call(client, settings, role, arguments, *, capabilities=None, extra=None):
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": UPDATE, "arguments": arguments, "_meta": envelope(capabilities), **(extra or {})},
+    }
+    headers = {
+        **HEADERS,
+        "authorization": f"Bearer {token(settings, role)}",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "tools/call",
+        "mcp-name": UPDATE,
+    }
+    return client.post("/mcp", json=body, headers=headers)
+
+
+def app_for(settings, store, confirm="off"):
+    server = build_server(policy=Policy(writes_enabled=True, confirm=confirm), store=store, remote=settings)
+    return http_app(server, host="0.0.0.0", remote=settings)
+
+
+def new_store():
+    return ContactStore([{"id": "c1", "name": "Ada", "email": "ada@example.org"}])
+
+
+# --- settings ----------------------------------------------------------------------
+
+
+def test_remote_mode_is_off_without_an_issuer():
+    assert RemoteSettings.from_env(PREFIX, {}) is None
+
+
+def test_supabase_url_sets_issuer_keys_and_audit_table(settings):
+    assert settings.issuer == "https://ref.supabase.co/auth/v1"
+    assert settings.jwks_url == "https://ref.supabase.co/auth/v1/.well-known/jwks.json"
+    assert settings.resource_url == "https://mcp.example.com/mcp"
+    assert settings.allowed_hosts == ("mcp.example.com",)
+    assert settings.audit_url == "https://ref.supabase.co"
+
+
+def test_public_url_falls_back_to_vercels_production_url():
+    env = {k: v for k, v in ENV.items() if not k.endswith("_PUBLIC_URL")}
+    settings = RemoteSettings.from_env(PREFIX, {**env, "VERCEL_PROJECT_PRODUCTION_URL": "srv.vercel.app"})
+    assert settings.resource_url == "https://srv.vercel.app/mcp"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({f"{PREFIX}_PUBLIC_URL": ""}, "PUBLIC_URL is required"),
+        ({f"{PREFIX}_PUBLIC_URL": "http://mcp.example.com"}, "must use https"),
+        ({f"{PREFIX}_REQUEST_STATE_KEY": ""}, "REQUEST_STATE_KEY is required"),
+    ],
+)
+def test_half_configured_remote_mode_refuses_to_start(change, message):
+    with pytest.raises(RemoteConfigError, match=message):
+        RemoteSettings.from_env(PREFIX, {**ENV, **change})
+
+
+def test_create_app_refuses_to_serve_without_sign_in():
+    with pytest.raises(RemoteConfigError, match="open to anyone"):
+        create_app({})
+    assert create_app({f"{PREFIX}_ALLOW_UNAUTHENTICATED": "true"})
+
+
+# --- token checks ------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_a_valid_token_is_accepted(settings):
+    access = await JWTVerifier(settings).verify_token(token(settings, "writer"))
+    assert access.subject == "user-1"
+    assert access.client_id == "client-1"
+    assert access.resource == settings.resource_url
+    assert settings.is_writer(access)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"aud": "https://other.example.com/mcp"},
+        {"iss": "https://evil.example.com/auth/v1"},
+        {"exp": int(time.time()) - 10},
+        {"client_id": None},
+    ],
+    ids=["wrong audience", "wrong issuer", "expired", "no client_id"],
+)
+async def test_bad_tokens_are_rejected(settings, overrides):
+    assert await JWTVerifier(settings).verify_token(token(settings, "writer", **overrides)) is None
+
+
+@pytest.mark.anyio
+async def test_a_token_signed_by_another_key_is_rejected(settings):
+    assert await JWTVerifier(settings).verify_token(token(settings, "writer", key=OTHER_KEY)) is None
+
+
+@pytest.mark.anyio
+async def test_writer_role_comes_only_from_the_configured_claim(settings):
+    verifier = JWTVerifier(settings)
+    reader = await verifier.verify_token(token(settings))
+    via_user_metadata = await verifier.verify_token(token(settings, user_metadata={"sett_role": "writer"}))
+    assert not settings.is_writer(reader)
+    assert not settings.is_writer(via_user_metadata)  # users can edit user_metadata themselves
+
+
+# --- over HTTP ---------------------------------------------------------------------
+
+
+def test_requests_without_a_token_get_401_pointing_to_the_metadata(settings):
+    with TestClient(app_for(settings, new_store()), base_url="https://mcp.example.com") as client:
+        response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=HEADERS)
+        metadata = client.get("/.well-known/oauth-protected-resource/mcp").json()
+    assert response.status_code == 401
+    assert "resource_metadata=" in response.headers["www-authenticate"]
+    assert metadata["resource"] == settings.resource_url
+    assert metadata["authorization_servers"] == [settings.issuer]
+
+
+def test_only_writers_can_use_write_tools(settings):
+    store = new_store()
+    with TestClient(app_for(settings, store), base_url="https://mcp.example.com") as client:
+        reader = call(client, settings, None, {"contact_id": "c1", "company": "Harbor"}).json()["result"]
+        assert reader["isError"]
+        assert "writer role" in reader["content"][0]["text"]
+        assert store.get("c1").get("company") is None
+        writer = call(client, settings, "writer", {"contact_id": "c1", "company": "Harbor"}).json()["result"]
+    assert not writer["isError"]
+    assert store.get("c1")["company"] == "Harbor"
+
+
+def test_the_public_host_is_accepted_and_others_refused(settings):
+    with TestClient(app_for(settings, new_store()), base_url="https://mcp.example.com") as client:
+        ok = call(client, settings, "writer", {"contact_id": "c1", "company": "Harbor"})
+        signed_in = {**HEADERS, "authorization": f"Bearer {token(settings, 'writer')}"}
+        evil = client.post("/mcp", json={}, headers={**signed_in, "host": "evil.example"})
+    assert ok.status_code == 200
+    assert evil.status_code == 421
+
+
+def test_a_confirmation_started_on_one_instance_finishes_on_another(settings):
+    store = new_store()
+    capabilities = {"elicitation": {"form": {}}}
+    arguments = {"contact_id": "c1", "company": "Harbor"}
+    with (
+        TestClient(app_for(settings, store, confirm="all_writes"), base_url="https://mcp.example.com") as a,
+        TestClient(app_for(settings, store, confirm="all_writes"), base_url="https://mcp.example.com") as b,
+    ):
+        asked = call(a, settings, "writer", arguments, capabilities=capabilities).json()["result"]
+        assert asked["resultType"] == "input_required"
+        key = next(iter(asked["inputRequests"]))
+        answer = {"inputResponses": {key: {"action": "accept", "content": {}}}, "requestState": asked["requestState"]}
+        done = call(b, settings, "writer", arguments, capabilities=capabilities, extra=answer).json()["result"]
+    assert done["resultType"] == "complete"
+    assert store.get("c1")["company"] == "Harbor"
+
+
+def test_audit_entries_name_the_signed_in_user(settings, capfd):
+    with TestClient(app_for(settings, new_store()), base_url="https://mcp.example.com") as client:
+        call(client, settings, "writer", {"contact_id": "c1", "company": "Harbor"})
+    lines = [line for line in capfd.readouterr().err.splitlines() if line.startswith("audit ")]
+    entry = json.loads(lines[-1].removeprefix("audit "))
+    assert entry["outcome"] == "ok"
+    assert entry["subject"] == "user-1"
+    assert entry["client_id"] == "client-1"

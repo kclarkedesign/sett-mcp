@@ -1,0 +1,56 @@
+# Running {{ project_name }} remotely
+
+Locally, each person runs their own copy over stdio. Remotely, one copy runs at a public URL, everyone you invite connects to `https://<your-host>/mcp` from Claude, Cursor or another client, and every request must carry a sign-in.
+
+The one-command deploy (`{{ project_slug }} deploy vercel --auth supabase`) is coming next and will set all of this up. This page explains what it configures, so you can also run it by hand or on another host.
+
+## What remote mode adds
+
+- **Sign-in required.** Every request needs a bearer token from your authorization server. Without one the server answers `401` and points the client to `/.well-known/oauth-protected-resource/mcp`, which tells it where to sign in. Tokens must be signed by the issuer's keys, unexpired, issued for this server's URL (the audience), and carry a `client_id`, so a website session from the same Supabase project can't be replayed here.
+- **A writer role.** Writes need two keys: `{{ env_prefix }}_ENABLE_WRITES=true` on the server, and the signed-in user's `app_metadata.sett_role` set to `writer`. Readers who try a write tool are refused, and the attempt is logged as `forbidden`. `app_metadata` can only be set with your Supabase secret key; never use `user_metadata`, which users can edit themselves.
+- **Confirmations across instances.** Hosts such as Vercel run several copies of the server. A shared `{{ env_prefix }}_REQUEST_STATE_KEY` lets a confirmation started on one copy finish on another.
+- **An audit trail that outlives the host's logs.** Each call goes to stderr (collected as host logs) and, with a Supabase secret key, to a `sett_audit` table, including who made it.
+- **Host checks for your domain.** Requests addressed to any other host are refused (`421`).
+
+## Settings
+
+All of them are environment variables. Remote mode is off until an issuer is set.
+
+| Variable | What it does |
+|---|---|
+| `{{ env_prefix }}_SUPABASE_URL` | `https://<ref>.supabase.co`. Sets the issuer (`/auth/v1`), its public keys and the audit table's address |
+| `{{ env_prefix }}_SUPABASE_SECRET_KEY` | Lets the server write audit rows. Keep it secret |
+| `{{ env_prefix }}_AUTH_ISSUER` | Any other OAuth 2.1 / OpenID issuer, instead of Supabase |
+| `{{ env_prefix }}_AUTH_JWKS_URL` | That issuer's public keys, if not at `<issuer>/.well-known/jwks.json` |
+| `{{ env_prefix }}_PUBLIC_URL` | `https://<your-host>`. On Vercel it defaults to the production URL |
+| `{{ env_prefix }}_REQUEST_STATE_KEY` | A random secret of 32+ characters, the same on every instance. Comma-separate two to rotate, new key first |
+| `{{ env_prefix }}_ALLOWED_HOSTS` | Extra host names to accept, such as a custom domain |
+| `{{ env_prefix }}_WRITER_CLAIM` / `_WRITER_VALUE` | Change which claim grants writes (default `app_metadata.sett_role` = `writer`) |
+| `{{ env_prefix }}_ENABLE_WRITES` | Still the ceiling: without it, no one can write |
+
+A half-configured server refuses to start: an issuer without a public URL or a shared key is an error, not a warning.
+
+## Running it
+
+On a host that runs ASGI apps:
+
+```bash
+uvicorn {{ package_name }}.asgi:app --host 0.0.0.0 --port 8000
+```
+
+`{{ package_name }}.asgi:app` refuses to start without sign-in configured, so a deployed server is never accidentally open. For a server on a private network only, set `{{ env_prefix }}_ALLOW_UNAUTHENTICATED=true`.
+
+To try remote mode on your machine, set the variables above with `{{ env_prefix }}_PUBLIC_URL=http://localhost:8000` and run `uv run {{ project_slug }} serve --http`.
+
+## What Supabase needs
+
+The deploy command will do these for you. By hand, in a Supabase project used only for this server:
+
+1. Turn on the **OAuth server** (Authentication → OAuth Server) with dynamic client registration, so MCP clients can register themselves.
+2. Use **asymmetric signing keys** (ES256), so the server can check tokens with public keys.
+3. Add a **custom access token hook** that adds your server's URL (`https://<your-host>/mcp`) to the token's `aud`. Supabase always issues `aud: "authenticated"`, and the server requires its own URL there.
+4. Host the **consent page** Supabase redirects to during sign-in.
+5. Turn off **open sign-ups**, then invite users and set `app_metadata.sett_role = "writer"` for those who may write.
+6. Create the `sett_audit` table (the SQL is `AUDIT_TABLE_SQL` in `src/{{ package_name }}/remote.py`).
+
+Supabase's OAuth server is in beta. Clients that sign in through it include Claude and Cursor; [Sett's client support table](https://github.com/kclarkedesign/sett-mcp#client-support) lists which of them can also show confirmation prompts.
