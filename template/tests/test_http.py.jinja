@@ -1,0 +1,61 @@
+"""HTTP mode (`serve --http`): the edge cases that break real clients, and the SDK's
+protections against requests from other websites."""
+
+from __future__ import annotations
+
+import pytest
+from starlette.testclient import TestClient
+
+from {{ package_name }}.guardrails import Policy
+from {{ package_name }}.server import build_server, http_app
+from {{ package_name }}.store import ContactStore
+
+HEADERS = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+}
+
+
+@pytest.fixture
+def client():
+    store = ContactStore([{"id": "c1", "name": "Ada", "email": "ada@example.org"}])
+    server = build_server(policy=Policy(), store=store)
+    with TestClient(http_app(server), base_url="http://127.0.0.1:8000") as test_client:
+        yield test_client
+
+
+def test_initialize_answers_with_plain_json(client):
+    response = client.post("/mcp", json=INITIALIZE, headers=HEADERS)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["result"]["serverInfo"]["name"]
+
+
+def test_get_answers_405_instead_of_holding_a_stream_open(client):
+    response = client.get("/mcp", headers={"accept": "text/event-stream"})
+    assert response.status_code == 405
+    assert response.headers["allow"] == "POST"
+    assert response.json()["error"]["code"] == -32600
+
+
+def test_delete_answers_405(client):
+    assert client.delete("/mcp").status_code == 405
+
+
+def test_requests_from_other_websites_are_refused(client):
+    response = client.post("/mcp", json=INITIALIZE, headers={**HEADERS, "origin": "https://evil.example"})
+    assert response.status_code == 403
+
+
+def test_unexpected_host_is_refused(client):
+    response = client.post("/mcp", json=INITIALIZE, headers={**HEADERS, "host": "evil.example"})
+    assert response.status_code == 421
+
+
+def test_unknown_paths_are_404_not_html(client):
+    response = client.get("/.well-known/oauth-protected-resource")
+    assert response.status_code == 404
+    assert "html" not in response.headers.get("content-type", "")
