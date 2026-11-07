@@ -176,6 +176,17 @@ async def test_bad_tokens_are_rejected(settings, overrides):
 
 
 @pytest.mark.anyio
+async def test_a_custom_issuer_is_matched_exactly_including_a_trailing_slash():
+    env = {k: v for k, v in ENV.items() if not k.endswith("_SUPABASE_URL")}
+    settings = RemoteSettings.from_env(PREFIX, {**env, f"{PREFIX}_AUTH_ISSUER": "https://tenant.auth0.com/"})
+    assert settings.issuer == "https://tenant.auth0.com/"
+    assert settings.jwks_url == "https://tenant.auth0.com/.well-known/jwks.json"
+    verifier = JWTVerifier(settings)
+    assert await verifier.verify_token(token(settings)) is not None
+    assert await verifier.verify_token(token(settings, iss="https://tenant.auth0.com")) is None
+
+
+@pytest.mark.anyio
 async def test_a_token_signed_by_another_key_is_rejected(settings):
     assert await JWTVerifier(settings).verify_token(token(settings, "writer", key=OTHER_KEY)) is None
 

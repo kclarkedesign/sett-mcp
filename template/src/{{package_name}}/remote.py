@@ -96,7 +96,9 @@ class RemoteSettings:
             return env.get(f"{prefix}_{name}", "").strip()
 
         supabase = get("SUPABASE_URL").rstrip("/")
-        issuer = get("AUTH_ISSUER").rstrip("/") or (f"{supabase}/auth/v1" if supabase else "")
+        # A custom issuer is kept exactly as written: `iss` is compared verbatim, and some
+        # providers (Auth0, for one) put a trailing slash in theirs.
+        issuer = get("AUTH_ISSUER") or (f"{supabase}/auth/v1" if supabase else "")
         if not issuer:
             return None
 
@@ -116,7 +118,9 @@ class RemoteSettings:
             )
 
         jwks_url = get("AUTH_JWKS_URL") or (
-            f"{supabase}/auth/v1/.well-known/jwks.json" if supabase and not get("AUTH_ISSUER") else f"{issuer}/.well-known/jwks.json"
+            f"{supabase}/auth/v1/.well-known/jwks.json"
+            if supabase and not get("AUTH_ISSUER")
+            else f"{issuer.rstrip('/')}/.well-known/jwks.json"
         )
         host = urlsplit(public_url).netloc
         extra_hosts = tuple(h.strip() for h in get("ALLOWED_HOSTS").split(",") if h.strip())
