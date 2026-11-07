@@ -205,6 +205,13 @@ async def test_azp_names_the_client_when_client_id_is_absent(settings):
 
 
 @pytest.mark.anyio
+async def test_shared_secret_algorithms_are_never_accepted(settings):
+    claims = jwt.decode(token(settings, "writer"), options={"verify_signature": False})
+    forged = jwt.encode(claims, "a-guessed-secret-that-is-long-enough", algorithm="HS256")
+    assert await JWTVerifier(settings).verify_token(forged) is None
+
+
+@pytest.mark.anyio
 async def test_a_token_signed_by_another_key_is_rejected(settings):
     assert await JWTVerifier(settings).verify_token(token(settings, "writer", key=OTHER_KEY)) is None
 

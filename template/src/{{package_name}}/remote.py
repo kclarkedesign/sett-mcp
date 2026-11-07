@@ -9,7 +9,7 @@ of it stays off unless an authorization server is configured:
     <PREFIX>_AUTH_JWKS_URL         its public keys (default: <issuer>/.well-known/jwks.json)
     <PREFIX>_PUBLIC_URL            https://your-server.example (default: Vercel's production URL)
     <PREFIX>_REQUEST_STATE_KEY     shared secret so confirmations survive across instances
-                                   (comma-separated for rotation: new key first)
+                                   (comma-separated for rotation; see docs/remote.md)
     <PREFIX>_ALLOWED_HOSTS         extra Host headers to accept (default: the public URL's host)
     <PREFIX>_WRITER_CLAIM          claim that grants writes (default: app_metadata.sett_role)
     <PREFIX>_WRITER_VALUE          its required value (default: writer)
@@ -53,7 +53,9 @@ create table if not exists public.{AUDIT_TABLE} (
 alter table public.{AUDIT_TABLE} enable row level security;
 """.strip()
 
-ALGORITHMS = ["ES256", "RS256", "EdDSA"]
+# Every standard asymmetric JWS algorithm (RFC 7518, RFC 8037). Shared-secret (HS*) and
+# "none" are never accepted: the server verifies with the issuer's public keys only.
+ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"]
 MIN_KEY_LENGTH = 32
 
 

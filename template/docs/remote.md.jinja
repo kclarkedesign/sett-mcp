@@ -23,12 +23,18 @@ All of them are environment variables. Remote mode is off until an issuer is set
 | `{{ env_prefix }}_AUTH_ISSUER` | Any other OAuth 2.1 / OpenID issuer, instead of Supabase |
 | `{{ env_prefix }}_AUTH_JWKS_URL` | That issuer's public keys, if not at `<issuer>/.well-known/jwks.json` |
 | `{{ env_prefix }}_PUBLIC_URL` | `https://<your-host>`, with no path (the server answers at `/mcp`). On Vercel it defaults to the production URL |
-| `{{ env_prefix }}_REQUEST_STATE_KEY` | A random secret of 32+ characters, the same on every instance. Comma-separate two to rotate, new key first |
+| `{{ env_prefix }}_REQUEST_STATE_KEY` | A random secret of 32+ characters, the same on every instance. To rotate, see below |
 | `{{ env_prefix }}_ALLOWED_HOSTS` | Extra host names to accept, such as a custom domain |
 | `{{ env_prefix }}_WRITER_CLAIM` / `_WRITER_VALUE` | Change which claim grants writes (default `app_metadata.sett_role` = `writer`) |
 | `{{ env_prefix }}_ENABLE_WRITES` | Still the ceiling: without it, no one can write |
 
 A half-configured server refuses to start: an issuer without a public URL or a shared key is an error, not a warning.
+
+**Rotating the request-state key** without breaking confirmations in flight takes three deploys, each fully rolled out before the next. The first key in the list seals new state, and every key in the list can open it:
+
+1. `old,new`: every instance can open state sealed with the new key, but still seals with the old one.
+2. `new,old`: instances seal with the new key; state sealed earlier with the old key still opens.
+3. `new`: after at least 10 minutes (how long a confirmation stays valid), drop the old key.
 
 ## Running it
 
