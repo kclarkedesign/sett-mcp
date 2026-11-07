@@ -273,7 +273,9 @@ class Guardrails:
         parameters plus `confirmation`) because that is what the SDK introspects.
         """
         hints = typing.get_type_hints(fn, include_extras=True)
-        params = list(inspect.signature(fn).parameters.values())
+        # Use the resolved types, not the strings `from __future__ import annotations` leaves:
+        # the SDK resolves strings against this module, where the tool's own names don't exist.
+        params = [p.replace(annotation=hints.get(p.name, p.annotation)) for p in inspect.signature(fn).parameters.values()]
         tool_params = [p for p in params if hints.get(p.name) is not Context]
         if message:
             unknown = {f for _, f, _, _ in string.Formatter().parse(message) if f} - {p.name for p in tool_params}
