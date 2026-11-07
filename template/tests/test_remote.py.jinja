@@ -123,6 +123,15 @@ def test_allowed_origins_keep_the_public_urls_scheme():
     assert extra.allowed_origins == ("https://mcp.example.com", "https://mcp.acme.dev")
 
 
+def test_host_names_are_lowercased_for_the_host_and_origin_checks():
+    settings = RemoteSettings.from_env(
+        PREFIX, {**ENV, f"{PREFIX}_PUBLIC_URL": "https://MCP.Example.com", f"{PREFIX}_ALLOWED_HOSTS": "Mcp.Acme.Dev"}
+    )
+    assert settings.resource_url == "https://mcp.example.com/mcp"
+    assert settings.allowed_hosts == ("mcp.example.com", "mcp.acme.dev")
+    assert settings.allowed_origins == ("https://mcp.example.com", "https://mcp.acme.dev")
+
+
 def test_public_url_falls_back_to_vercels_production_url():
     env = {k: v for k, v in ENV.items() if not k.endswith("_PUBLIC_URL")}
     settings = RemoteSettings.from_env(PREFIX, {**env, "VERCEL_PROJECT_PRODUCTION_URL": "srv.vercel.app"})

@@ -134,8 +134,11 @@ class RemoteSettings:
             if supabase and not get("AUTH_ISSUER")
             else f"{issuer.rstrip('/')}/.well-known/jwks.json"
         )
-        host = urlsplit(public_url).netloc
-        extra_hosts = tuple(h.strip() for h in get("ALLOWED_HOSTS").split(",") if h.strip())
+        # Host names are case-insensitive, but the SDK compares Host and Origin headers
+        # exactly, and clients send them in lowercase.
+        host = parts.netloc.lower()
+        public_url = f"{parts.scheme}://{host}"
+        extra_hosts = tuple(h.strip().lower() for h in get("ALLOWED_HOSTS").split(",") if h.strip())
         return cls(
             public_url=public_url,
             issuer=issuer,
