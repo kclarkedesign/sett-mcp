@@ -41,6 +41,7 @@ Plus the plumbing that usually takes an afternoon:
 - A runnable example (a small contacts store) you replace with your real API client
 - `install-claude-desktop` command that writes the config for macOS, Windows and Linux
 - Stdio by default, stateless Streamable HTTP with `serve --http`, tested against the edge cases that break real clients
+- Remote mode: sign-in through Supabase or any OAuth provider, a writer role for write tools, confirmations that work across server instances, and an audit table
 - Setup instructions for Claude Desktop, Claude Code, Cursor, the MCP Inspector and Docker
 - Tests that drive the server through a real MCP client on both protocol versions
 - GitHub Actions for CI and PyPI publishing, so users can run `uvx your-server`
@@ -108,7 +109,7 @@ SDK v2 renamed `FastMCP` to `MCPServer` and changed a dozen other things. See [d
 
 ## Roadmap
 
-- **Remote in one command:** `deploy vercel --auth supabase`, which hosts the server on your own Vercel project with Supabase handling OAuth, and write access tied to user roles
+- **Remote in one command:** `deploy vercel --auth supabase`, which hosts the server on your own Vercel project with Supabase handling sign-in. The server side (sign-in, writer role, audit table) is in; the deploy command is next
 - One-click `.mcpb` bundles for Claude Desktop
 - Cloudflare Workers deploy target
 - Example connectors, starting with a read-only Salesforce analyst server

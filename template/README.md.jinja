@@ -113,7 +113,9 @@ Return dicts or lists of dicts so masking can see field names.
 
 ## HTTP mode
 
-`uv run {{ project_slug }} serve --http` serves stateless Streamable HTTP at `http://127.0.0.1:8000/mcp`. Responses are plain JSON, GET answers 405 (a stateless server has no event stream), requests from other websites and unexpected Host headers are refused, and bodies over 4 MB are rejected. HTTP mode has no authentication yet, so keep it on localhost.
+`uv run {{ project_slug }} serve --http` serves stateless Streamable HTTP at `http://127.0.0.1:8000/mcp`. Responses are plain JSON, GET answers 405 (a stateless server has no event stream), requests from other websites and unexpected Host headers are refused, and bodies over 4 MB are rejected.
+
+Without sign-in configured, keep HTTP mode on localhost. [docs/remote.md](docs/remote.md) explains remote mode: sign-in through Supabase or another OAuth provider, a writer role for write tools, confirmations that work across server instances, and an audit table.
 
 ## Publishing
 

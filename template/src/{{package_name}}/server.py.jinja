@@ -1,4 +1,8 @@
-"""Entry point: builds the server and runs it over stdio (default) or HTTP."""
+"""Entry point: builds the server and runs it over stdio (default) or HTTP.
+
+`create_app()` is the ASGI app for hosting (see `asgi.py`). It refuses to start without
+sign-in configured, so a deployed server is never accidentally open to the internet.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +14,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from collections.abc import Mapping
 
-from .guardrails import Guardrails, Policy
+from mcp.server.auth.settings import AuthSettings
+from mcp.server.mcpserver import MCPServer
+from mcp.server.request_state import RequestStateSecurity
+from mcp.server.transport_security import TransportSecuritySettings
+
+from .guardrails import _TRUTHY, AuditSink, Guardrails, Policy
+from .remote import JWTVerifier, RemoteConfigError, RemoteSettings, StderrAuditSink, SupabaseAuditSink
 from .store import ContactStore
 from .tools import register_tools
 
@@ -20,36 +30,74 @@ ENV_PREFIX = "{{ env_prefix }}"
 log = logging.getLogger("{{ package_name }}")
 
 
-def build_server(policy: Policy | None = None, store: ContactStore | None = None) -> MCPServer:
+def build_server(
+    policy: Policy | None = None,
+    store: ContactStore | None = None,
+    remote: RemoteSettings | None = None,
+) -> MCPServer:
+    """Build the server. With `remote`, every request must carry a valid sign-in."""
     policy = policy or Policy.load(ENV_PREFIX, package=__package__)
     if store is None:
         data_path = os.environ.get(f"{ENV_PREFIX}_DATA_PATH")
         store = ContactStore.open(__package__, Path(data_path).expanduser() if data_path else None)
 
+    auth: dict[str, Any] = {}
+    sinks: list[AuditSink] = []
+    if remote is not None:
+        auth = {
+            "token_verifier": JWTVerifier(remote),
+            "auth": AuthSettings(
+                issuer_url=remote.issuer,
+                resource_server_url=remote.resource_url,
+                validate_token_resource=True,
+            ),
+            # Shared across instances, so a confirmation can finish on a different one.
+            "request_state_security": RequestStateSecurity(keys=list(remote.request_state_keys)),
+        }
+        sinks.append(StderrAuditSink())
+        if remote.audit_url and remote.audit_key:
+            sinks.append(SupabaseAuditSink(remote.audit_url, remote.audit_key))
+
     server = MCPServer(
         {{ project_name | tojson }},
         instructions={{ description | tojson }},
+        **auth,
     )
-    guard = Guardrails(server, policy)
+    guard = Guardrails(
+        server,
+        policy,
+        writer_check=remote.is_writer if remote is not None else None,
+        audit_sinks=sinks,
+    )
     register_tools(guard, store)
     log.info(
-        "Registered tools: %s (writes %s)",
+        "Registered tools: %s (writes %s%s)",
         ", ".join(guard.registered),
         "enabled" if policy.writes_enabled else "disabled",
+        ", writer role required" if remote is not None and policy.writes_enabled else "",
     )
     return server
 
 
-def http_app(server: MCPServer, host: str = "127.0.0.1") -> Any:
+def http_app(server: MCPServer, host: str = "127.0.0.1", remote: RemoteSettings | None = None) -> Any:
     """The server as a stateless Streamable HTTP app, served at /mcp.
 
     Stateless means any replica can answer any request, and responses are plain JSON.
     A stateless server has no event stream to offer, so GET /mcp answers 405 instead of
     holding an empty stream open. The SDK's checks stay in place: requests from other
     websites (Origin) and unexpected Host headers are refused, and bodies over 4 MB are
-    rejected.
+    rejected. With `remote`, the Host and Origin checks accept the public URL's host.
     """
-    app = server.streamable_http_app(stateless_http=True, json_response=True, host=host)
+    security = None
+    if remote is not None:
+        security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[pattern for h in remote.allowed_hosts for pattern in (h, f"{h}:*")],
+            allowed_origins=list(remote.allowed_origins),
+        )
+    app = server.streamable_http_app(
+        stateless_http=True, json_response=True, host=host, transport_security=security
+    )
     not_allowed = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -67,6 +115,26 @@ def http_app(server: MCPServer, host: str = "127.0.0.1") -> Any:
         await app(scope, receive, send)
 
     return asgi
+
+
+def create_app(env: Mapping[str, str] = os.environ) -> Any:
+    """The ASGI app for hosting (Vercel, containers): sign-in required.
+
+    Without an authorization server configured it refuses to start, unless
+    `{{ env_prefix }}_ALLOW_UNAUTHENTICATED=true` says the network around it is private.
+    """
+    remote = RemoteSettings.from_env(ENV_PREFIX, env)
+    if remote is None:
+        if env.get(f"{ENV_PREFIX}_ALLOW_UNAUTHENTICATED", "").strip().lower() not in _TRUTHY:
+            raise RemoteConfigError(
+                f"No sign-in is configured, so this server would be open to anyone who finds its URL. "
+                f"Set {ENV_PREFIX}_SUPABASE_URL (or {ENV_PREFIX}_AUTH_ISSUER), or set "
+                f"{ENV_PREFIX}_ALLOW_UNAUTHENTICATED=true if it only runs on a private network."
+            )
+        log.warning("Serving without sign-in (%s_ALLOW_UNAUTHENTICATED is set)", ENV_PREFIX)
+        return http_app(build_server(), host="0.0.0.0")
+    log.info("Sign-in required: issuer %s, resource %s", remote.issuer, remote.resource_url)
+    return http_app(build_server(remote=remote), host="0.0.0.0", remote=remote)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -95,19 +163,21 @@ def main(argv: list[str] | None = None) -> None:
         install_claude_desktop(use_uvx=args.use_uvx, dry_run=args.dry_run)
         return
 
-    server = build_server()
     if getattr(args, "http", False):
-        log.warning(
-            "HTTP mode has no authentication yet. It listens on %s:%s; keep it on localhost "
-            "or behind an authenticating proxy.",
-            args.host,
-            args.port,
-        )
         import uvicorn
 
-        uvicorn.run(http_app(server, host=args.host), host=args.host, port=args.port, log_level="info")
+        remote = RemoteSettings.from_env(ENV_PREFIX, os.environ)
+        if remote is None:
+            log.warning(
+                "HTTP mode without sign-in, listening on %s:%s. Keep it on localhost, or configure "
+                "sign-in (see docs/remote.md).",
+                args.host,
+                args.port,
+            )
+        server = build_server(remote=remote)
+        uvicorn.run(http_app(server, host=args.host, remote=remote), host=args.host, port=args.port, log_level="info")
     else:
-        server.run()
+        build_server().run()
 
 
 if __name__ == "__main__":
