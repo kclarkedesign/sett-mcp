@@ -80,13 +80,14 @@ Tested in November 2026 with the example server this template generates:
 | Client | Tools and masking | Confirmation prompts |
 |---|---|---|
 | Claude Code | ✅ | ✅ Shows an Accept / Decline prompt, including in auto mode |
+| Cursor | ✅ | ✅ Shows a Submit / Cancel prompt. Answer it promptly: Cursor gives up on a call that waits too long, then retries |
+| Codex (desktop app; CLI 0.153 and 0.167) | ✅ | ⛔ Declines automatically without showing a prompt, so tools that need confirmation never run ([openai/codex#6992](https://github.com/openai/codex/issues/6992)) |
 | Claude Desktop 4.x (Windows) | ✅ | ⛔ No prompt shown, so tools that need confirmation are refused and nothing changes |
-| Cursor | Not tested yet | Not tested yet |
 
 What that means in practice:
 
 - **A confirmation is only as strong as the client.** Sett can't tell a person clicking Accept from a client that accepts automatically. The write gate and the allow / deny lists don't depend on the client at all, so treat those as the hard limits.
-- **In clients without prompts,** keep the default `confirm: destructive`. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
+- **In clients without prompts** (Codex and Claude Desktop today), keep the default `confirm: destructive`. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
 - **Claude may refuse on its own.** In our tests Claude sometimes declined to call a tool described as permanently deleting data, or asked in chat first. That's a welcome extra layer, but it depends on the model and the conversation, which is why the server enforces confirmation itself.
 
 Tried another client? Open an issue with what you saw and we'll add it to the table.
