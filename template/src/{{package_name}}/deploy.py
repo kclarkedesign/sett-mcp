@@ -217,6 +217,26 @@ class Vercel:
         named = re.search(r'"username"\s*:\s*"([^"]+)"', out)
         return named.group(1) if named else (out.splitlines() or ["?"])[-1]
 
+    def current_team(self) -> str | None:
+        """The team the CLI is using, so `vercel link` needn't ask "Which team?" (it does, even with --yes)."""
+        if self._scope:
+            return self._scope
+        out = self._vercel("teams", "ls", "--format", "json", check=False)
+        try:
+            teams = json.loads(out[out.index("{") :]).get("teams", [])
+        except ValueError:
+            return None  # an older CLI: link asks, and the question shows in the terminal
+        current = [t.get("slug") for t in teams if t.get("current")] or (
+            [teams[0].get("slug")] if len(teams) == 1 else []
+        )
+        if current and isinstance(current[0], str):
+            self._scope = current[0]
+        return self._scope
+
+    @property
+    def scope(self) -> str | None:
+        return self._scope
+
     def linked_project(self) -> str | None:
         """The project this folder is linked to (`vercel link` writes .vercel/project.json)."""
         try:
@@ -229,6 +249,7 @@ class Vercel:
     def link(self, project: str) -> None:
         if self.linked_project() == project:
             return  # linking again would ask "Which team?" again
+        self.current_team()
         self._vercel("project", "add", project, check=False)  # already there is fine
         self._vercel("link", "--yes", "--project", project)
 
@@ -349,7 +370,6 @@ class DeployOptions:
     vercel_project: str
     env_prefix: str
     cwd: Path
-    vercel_scope: str | None = None
     enable_writes: bool = False
     github_client_id: str | None = None
     github_secret: str | None = None
@@ -374,6 +394,16 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
             f"switch to ES256: https://supabase.com/dashboard/project/{supabase.ref}/settings/jwt Then run this again."
         )
     auth = supabase.auth_config()
+    # Checked before any key leaves Supabase: a project that already serves another site
+    # stays untouched unless you say otherwise.
+    site_url = (auth.get("site_url") or "").rstrip("/")
+    ours = {"", "http://localhost:3000", load_state(options.cwd).get("url", "")}  # new, or an earlier deploy
+    if site_url not in ours and not options.yes:
+        raise DeployError(
+            f"This Supabase project's Site URL is {site_url}. The deploy would point it at this server, "
+            "which breaks sign-in for anything else using the project. Use a project just for this "
+            "server, or run again with --yes if that address was this server's."
+        )
 
     say("2/7 Reading the project's keys")
     keys = supabase.api_keys()
@@ -408,15 +438,6 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     public = resource.removesuffix("/mcp")
     say(f"    live at {public}")
 
-    site_url = (auth.get("site_url") or "").rstrip("/")
-    ours = {"", "http://localhost:3000", public, load_state(options.cwd).get("url", "")}  # earlier deploys
-    if site_url not in ours and not options.yes:
-        raise DeployError(
-            f"This Supabase project's Site URL is {site_url}. The deploy points it at {public}, which "
-            "would break sign-in for anything else using the project. Use a project just for this "
-            "server, or run again with --yes to replace it."
-        )
-
     say("5/7 Creating the audit table and the token hook")
     supabase.sql(AUDIT_TABLE_SQL)
     supabase.sql(hook_sql(resource))
@@ -446,7 +467,7 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
         {
             "supabase_project": supabase.ref,
             "vercel_project": options.vercel_project,
-            **({"vercel_scope": options.vercel_scope} if options.vercel_scope else {}),
+            **({"vercel_scope": vercel.scope} if vercel.scope else {}),
             "url": public,
         },
     )

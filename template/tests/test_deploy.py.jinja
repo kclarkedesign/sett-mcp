@@ -96,6 +96,9 @@ class FakeVercel:
         args = argv[1 : argv.index("--cwd")]
         if args[0] == "whoami":
             return 0, "kirk\n", ""
+        if args[:2] == ["teams", "ls"]:
+            teams = [{"slug": "other-team", "current": False}, {"slug": "kirk-projects", "current": True}]
+            return 0, json.dumps({"teams": teams}), ""
         if args[:2] == ["env", "ls"]:
             return 0, "\n".join(sorted(self.existing_env)), ""
         if args[:2] == ["env", "add"]:
@@ -153,7 +156,12 @@ def test_deploy_sets_everything_up(run, tmp_path):
     }
 
     state = json.loads((tmp_path / deploy.STATE_FILE).read_text())
-    assert state == {"supabase_project": REF, "vercel_project": "my-server", "url": f"https://{HOST}"}
+    assert state == {
+        "supabase_project": REF,
+        "vercel_project": "my-server",
+        "vercel_scope": "kirk-projects",
+        "url": f"https://{HOST}",
+    }
     assert "sb_secret" not in (tmp_path / deploy.STATE_FILE).read_text()
 
 
@@ -165,6 +173,13 @@ def test_steps_run_in_a_safe_order(run):
     sql_at = next(i for i, c in enumerate(supabase.calls) if c[1].endswith("/database/query"))
     patch_at = next(i for i, c in enumerate(supabase.calls) if c[0] == "PATCH")
     assert sql_at < patch_at
+
+
+def test_linking_names_the_current_team_so_vercel_doesnt_ask(run, tmp_path):
+    _, _, vercel = run()
+    (link,) = vercel.ran("link")
+    assert link[link.index("--scope") + 1] == "kirk-projects"
+    assert json.loads((tmp_path / deploy.STATE_FILE).read_text())["vercel_scope"] == "kirk-projects"
 
 
 def test_an_already_linked_folder_is_not_linked_again(run, tmp_path):
@@ -215,10 +230,13 @@ def test_shared_secret_projects_stop_before_anything_changes(run):
 
 
 def test_a_project_used_by_another_site_is_not_taken_over(run):
-    supabase = FakeSupabase(site_url="https://shop.example.com")
+    supabase, vercel = FakeSupabase(site_url="https://shop.example.com"), FakeVercel()
     with pytest.raises(DeployError, match="Site URL"):
-        run(supabase=supabase)
+        run(supabase=supabase, vercel=vercel)
     assert not supabase.sent("PATCH", "/config/auth") and not supabase.sent("POST", "/database/query")
+    # Stopped before reading keys or touching Vercel, so no secret left Supabase.
+    assert not supabase.sent("GET", "/api-keys?reveal=true")
+    assert not vercel.ran("link") and not vercel.ran("env", "add")
     run(supabase=FakeSupabase(site_url="https://shop.example.com"), yes=True)
 
 

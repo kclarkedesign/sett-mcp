@@ -38,6 +38,8 @@ What it does, in order:
 6. Turns on Supabase's OAuth server with dynamic client registration, points it at this server's consent page, turns on the token hook, and turns off open sign-ups.
 7. Checks that `/mcp` answers `401` without a sign-in and the consent page loads, then saves `sett-deploy.json`.
 
+**Free plans:** Vercel's Hobby plan is for non-commercial use, so a server for a business needs Vercel Pro. A free Supabase project pauses after about a week without activity, and sign-in stops until you restore it in the dashboard; check both providers' current terms before relying on a free plan.
+
 ### Who can sign in
 
 New sign-ups are off, so add people first. They sign in with GitHub (using the same email) or a link sent to their email:

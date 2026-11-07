@@ -275,7 +275,6 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
         vercel_project=args.vercel_project or state.get("vercel_project") or "{{ project_slug }}",
         env_prefix=ENV_PREFIX,
         cwd=cwd,
-        vercel_scope=scope,
         enable_writes=args.writes,
         github_client_id=args.github_client_id,
         github_secret=github_secret,

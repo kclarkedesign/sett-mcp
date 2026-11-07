@@ -175,7 +175,8 @@ _PAGE = """<!doctype html>
     if (error) return fail("Couldn't send a link: " + error.message);
     $("sent").hidden = false;
   };
-  $("switch").onclick = async () => { await sb.auth.signOut(); show("signin"); };
+  // Local only: the default ("global") would also sign this person out of every other client.
+  $("switch").onclick = async () => { await sb.auth.signOut({ scope: "local" }); show("signin"); };
 
   async function answer(approve) {
     $("allow").disabled = $("deny").disabled = true;
