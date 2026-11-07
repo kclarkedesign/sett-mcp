@@ -5,4 +5,5 @@ __pycache__
 tests
 dist
 *.jsonl
-.env
+.env*
+.vercel

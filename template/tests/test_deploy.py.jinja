@@ -158,6 +158,13 @@ def test_steps_run_in_a_safe_order(run):
     assert sql_at < patch_at
 
 
+def test_an_already_linked_folder_is_not_linked_again(run, tmp_path):
+    (tmp_path / ".vercel").mkdir()
+    (tmp_path / ".vercel" / "project.json").write_text('{"projectId": "p", "orgId": "o", "projectName": "my-server"}')
+    _, _, vercel = run()
+    assert not vercel.ran("link") and not vercel.ran("project", "add")
+
+
 def test_request_state_key_is_kept_across_deploys(run):
     _, _, vercel = run(vercel=FakeVercel(existing_env={f"{PREFIX}_REQUEST_STATE_KEY"}))
     assert f"{PREFIX}_REQUEST_STATE_KEY" not in vercel.env

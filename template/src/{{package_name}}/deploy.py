@@ -192,7 +192,18 @@ class Vercel:
         named = re.search(r'"username"\s*:\s*"([^"]+)"', out)
         return named.group(1) if named else (out.splitlines() or ["?"])[-1]
 
+    def linked_project(self) -> str | None:
+        """The project this folder is linked to (`vercel link` writes .vercel/project.json)."""
+        try:
+            data = json.loads((self._cwd / ".vercel" / "project.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        name = data.get("projectName")
+        return name if isinstance(name, str) else None
+
     def link(self, project: str) -> None:
+        if self.linked_project() == project:
+            return  # linking again would ask "Which team?" again
         self._vercel("project", "add", project, check=False)  # already there is fine
         self._vercel("link", "--yes", "--project", project)
 
