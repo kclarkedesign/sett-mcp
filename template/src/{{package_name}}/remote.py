@@ -54,6 +54,7 @@ alter table public.{AUDIT_TABLE} enable row level security;
 """.strip()
 
 ALGORITHMS = ["ES256", "RS256", "EdDSA"]
+MIN_KEY_LENGTH = 32
 
 
 class RemoteConfigError(ValueError):
@@ -107,14 +108,25 @@ class RemoteSettings:
             public_url = "https://" + env["VERCEL_PROJECT_PRODUCTION_URL"].strip().rstrip("/")
         if not public_url:
             raise RemoteConfigError(f"{prefix}_PUBLIC_URL is required when sign-in is configured")
-        if urlsplit(public_url).scheme != "https" and urlsplit(public_url).hostname not in ("localhost", "127.0.0.1"):
+        parts = urlsplit(public_url)
+        if parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1"):
             raise RemoteConfigError(f"{prefix}_PUBLIC_URL must use https: {public_url}")
+        if parts.path not in ("", "/") or parts.query or parts.fragment:
+            # The server answers at <host>/mcp, and tokens are checked against that URL.
+            raise RemoteConfigError(f"{prefix}_PUBLIC_URL must be just the scheme and host, with no path: {public_url}")
 
         keys = tuple(k.strip() for k in get("REQUEST_STATE_KEY").split(",") if k.strip())
         if not keys:
             raise RemoteConfigError(
                 f"{prefix}_REQUEST_STATE_KEY is required when sign-in is configured: without a shared "
                 "key, a confirmation started on one server instance can't finish on another"
+            )
+        if any(len(k) < MIN_KEY_LENGTH for k in keys):
+            # The key seals the state that carries a user's confirmation; a guessable one
+            # would let someone forge "the user said yes".
+            raise RemoteConfigError(
+                f"Every {prefix}_REQUEST_STATE_KEY must be at least {MIN_KEY_LENGTH} random characters "
+                "(for example: python -c \"import secrets; print(secrets.token_urlsafe(32))\")"
             )
 
         jwks_url = get("AUTH_JWKS_URL") or (

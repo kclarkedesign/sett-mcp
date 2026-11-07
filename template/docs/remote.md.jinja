@@ -22,7 +22,7 @@ All of them are environment variables. Remote mode is off until an issuer is set
 | `{{ env_prefix }}_SUPABASE_SECRET_KEY` | Lets the server write audit rows. Keep it secret |
 | `{{ env_prefix }}_AUTH_ISSUER` | Any other OAuth 2.1 / OpenID issuer, instead of Supabase |
 | `{{ env_prefix }}_AUTH_JWKS_URL` | That issuer's public keys, if not at `<issuer>/.well-known/jwks.json` |
-| `{{ env_prefix }}_PUBLIC_URL` | `https://<your-host>`. On Vercel it defaults to the production URL |
+| `{{ env_prefix }}_PUBLIC_URL` | `https://<your-host>`, with no path (the server answers at `/mcp`). On Vercel it defaults to the production URL |
 | `{{ env_prefix }}_REQUEST_STATE_KEY` | A random secret of 32+ characters, the same on every instance. Comma-separate two to rotate, new key first |
 | `{{ env_prefix }}_ALLOWED_HOSTS` | Extra host names to accept, such as a custom domain |
 | `{{ env_prefix }}_WRITER_CLAIM` / `_WRITER_VALUE` | Change which claim grants writes (default `app_metadata.sett_role` = `writer`) |

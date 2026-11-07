@@ -134,7 +134,10 @@ def test_public_url_falls_back_to_vercels_production_url():
     [
         ({f"{PREFIX}_PUBLIC_URL": ""}, "PUBLIC_URL is required"),
         ({f"{PREFIX}_PUBLIC_URL": "http://mcp.example.com"}, "must use https"),
+        ({f"{PREFIX}_PUBLIC_URL": "https://example.com/tools"}, "no path"),
         ({f"{PREFIX}_REQUEST_STATE_KEY": ""}, "REQUEST_STATE_KEY is required"),
+        ({f"{PREFIX}_REQUEST_STATE_KEY": "x"}, "at least 32"),
+        ({f"{PREFIX}_REQUEST_STATE_KEY": "a" * 32 + ",short"}, "at least 32"),
     ],
 )
 def test_half_configured_remote_mode_refuses_to_start(change, message):
