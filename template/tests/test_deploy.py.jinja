@@ -189,6 +189,20 @@ def test_an_already_linked_folder_is_not_linked_again(run, tmp_path):
     assert not vercel.ran("link") and not vercel.ran("project", "add")
 
 
+def test_naming_a_team_relinks_even_when_the_folder_is_linked(run, tmp_path):
+    (tmp_path / ".vercel").mkdir()
+    (tmp_path / ".vercel" / "project.json").write_text('{"projectId": "p", "orgId": "o", "projectName": "my-server"}')
+    supabase, vercel = FakeSupabase(), FakeVercel()
+    opts = DeployOptions(
+        vercel_project="my-server", env_prefix=PREFIX, cwd=tmp_path, team_chosen=True,
+        say=lambda _: None, sleep=lambda _: None,
+    )
+    deploy.deploy(opts, Supabase("token", REF, supabase), Vercel(tmp_path, scope="acme-team", run=vercel), request=supabase)
+    (link,) = vercel.ran("link")
+    assert link[link.index("--scope") + 1] == "acme-team"
+    assert not vercel.ran("teams", "ls")  # the named team is used as is
+
+
 def test_request_state_key_is_kept_across_deploys(run):
     _, _, vercel = run(vercel=FakeVercel(existing_env={f"{PREFIX}_REQUEST_STATE_KEY"}))
     assert f"{PREFIX}_REQUEST_STATE_KEY" not in vercel.env

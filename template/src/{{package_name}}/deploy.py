@@ -246,9 +246,14 @@ class Vercel:
         name = data.get("projectName")
         return name if isinstance(name, str) else None
 
-    def link(self, project: str) -> None:
-        if self.linked_project() == project:
-            return  # linking again would ask "Which team?" again
+    def link(self, project: str, *, relink: bool = False) -> None:
+        """Link this folder to the project, in the chosen team (--scope) or the CLI's current one.
+
+        An existing link to the same project name is reused, unless `relink` (a team was
+        named), since a project of that name may also exist in another team.
+        """
+        if self.linked_project() == project and not relink:
+            return
         self.current_team()
         self._vercel("project", "add", project, check=False)  # already there is fine
         self._vercel("link", "--yes", "--project", project)
@@ -375,6 +380,7 @@ class DeployOptions:
     github_secret: str | None = None
     yes: bool = False
     command: str = ""
+    team_chosen: bool = False  # --scope was given: link in that team even if the folder is linked
     say: Callable[[str], None] = print
     sleep: Callable[[float], None] = time.sleep
 
@@ -411,7 +417,9 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     secret = secret_key(supabase, keys)
 
     say(f"3/7 Linking Vercel project {options.vercel_project}")
-    vercel.link(options.vercel_project)
+    vercel.link(options.vercel_project, relink=options.team_chosen)
+    if vercel.scope:
+        say(f"    team {vercel.scope} (for another, run again with --scope <team>; `vercel teams ls` lists them)")
     existing = vercel.env_names()
     settings = {
         f"{prefix}_SUPABASE_URL": supabase.url,

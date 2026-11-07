@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> None:
     vercel.add_argument("--auth", choices=["supabase"], default="supabase", help="Who handles sign-in")
     vercel.add_argument("--supabase-project", help="Project ref or URL (saved after the first deploy)")
     vercel.add_argument("--vercel-project", help="Vercel project name (default: {{ project_slug }})")
-    vercel.add_argument("--scope", help="Vercel team, if not your personal account")
+    vercel.add_argument("--scope", help="Vercel team slug (default: the CLI's current team; `vercel teams ls` lists them)")
     vercel.add_argument("--writes", action="store_true", help="Let users with the writer role write")
     vercel.add_argument("--github-client-id", help="Turn on GitHub sign-in (secret from GITHUB_CLIENT_SECRET or a prompt)")
     vercel.add_argument("--yes", action="store_true", help="Replace the Supabase project's Site URL if it's set elsewhere")
@@ -280,6 +280,7 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
         github_secret=github_secret,
         yes=args.yes,
         command="uv run {{ project_slug }}",
+        team_chosen=bool(args.scope),
     )
     supabase = deploy.Supabase(deploy.access_token(os.environ), deploy.project_ref(ref))
     deploy.deploy(options, supabase, deploy.Vercel(cwd, scope))

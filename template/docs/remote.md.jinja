@@ -25,7 +25,7 @@ It prints each step and ends with the address to connect clients to, `https://<y
 | `--writes` | Lets users with the writer role write (sets `{{ env_prefix }}_ENABLE_WRITES=true`). Every deploy without it turns writes off |
 | `--github-client-id <id>` | Turns on GitHub sign-in; the secret comes from `GITHUB_CLIENT_SECRET` or a prompt |
 | `--vercel-project <name>` | The Vercel project to create or reuse (default `{{ project_slug }}`) |
-| `--scope <team>` | A Vercel team instead of your personal account |
+| `--scope <team>` | The Vercel team to deploy in (default: the CLI's current team, which the deploy prints). `vercel teams ls` lists them |
 | `--yes` | Replace the Supabase project's Site URL if it already points somewhere else |
 
 What it does, in order:
