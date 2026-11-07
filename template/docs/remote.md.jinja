@@ -6,11 +6,11 @@ The one-command deploy (`{{ project_slug }} deploy vercel --auth supabase`) is c
 
 ## What remote mode adds
 
-- **Sign-in required.** Every request needs a bearer token from your authorization server. Without one the server answers `401` and points the client to `/.well-known/oauth-protected-resource/mcp`, which tells it where to sign in. Tokens must be signed by the issuer's keys, unexpired, issued for this server's URL (the audience), and carry a `client_id`, so a website session from the same Supabase project can't be replayed here.
+- **Sign-in required.** Every request needs a bearer token from your authorization server. Without one the server answers `401` and points the client to `/.well-known/oauth-protected-resource/mcp`, which tells it where to sign in. Tokens must be signed by the issuer's keys, unexpired, issued for this server's URL (the audience), and name the app they were issued to (`client_id`, or `azp` for providers such as Auth0), so a website session from the same Supabase project can't be replayed here.
 - **A writer role.** Writes need two keys: `{{ env_prefix }}_ENABLE_WRITES=true` on the server, and the signed-in user's `app_metadata.sett_role` set to `writer`. Readers who try a write tool are refused, and the attempt is logged as `forbidden`. `app_metadata` can only be set with your Supabase secret key; never use `user_metadata`, which users can edit themselves.
 - **Confirmations across instances.** Hosts such as Vercel run several copies of the server. A shared `{{ env_prefix }}_REQUEST_STATE_KEY` lets a confirmation started on one copy finish on another.
 - **An audit trail that outlives the host's logs.** Each call goes to stderr (collected as host logs) and, with a Supabase secret key, to a `sett_audit` table, including who made it.
-- **Host checks for your domain.** Requests addressed to any other host are refused (`421`).
+- **Host checks for your domain.** Requests addressed to any other host are refused (`421`), and browser requests from other websites are refused (`403`). MCP clients such as Claude, ChatGPT, Cursor and Codex connect from their own servers and apps, so they aren't affected; a web page on another site calling this server directly is not supported, and the server sends no CORS headers.
 
 ## Settings
 

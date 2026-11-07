@@ -167,8 +167,8 @@ class JWTVerifier:
     """Checks a bearer token against the issuer's public keys (the SDK's `TokenVerifier`).
 
     A token is accepted only when its signature, issuer and expiry are valid, its audience
-    is this server's URL, and it carries a `client_id` (so a sign-in issued to some other
-    app, such as a website session, can't be replayed here).
+    is this server's URL, and it names the app it was issued to (`client_id`, or `azp` for
+    providers such as Auth0), so a website session can't be replayed here.
     """
 
     def __init__(self, settings: RemoteSettings, signing_keys: _SigningKeys | None = None) -> None:
@@ -189,9 +189,11 @@ class JWTVerifier:
         except jwt.PyJWTError as exc:
             log.info("Rejected a bearer token: %s", exc)
             return None
-        client_id = claims.get("client_id")
+        # The app the token was issued to: `client_id` (RFC 9068, Supabase) or `azp`
+        # (Auth0's default access-token profile and OpenID providers).
+        client_id = claims.get("client_id") or claims.get("azp")
         if not isinstance(client_id, str) or not client_id:
-            log.info("Rejected a bearer token without a client_id claim")
+            log.info("Rejected a bearer token without a client_id or azp claim")
             return None
         scope = claims.get("scope", "")
         return AccessToken(

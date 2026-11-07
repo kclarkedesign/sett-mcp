@@ -199,6 +199,12 @@ async def test_a_custom_issuer_is_matched_exactly_including_a_trailing_slash():
 
 
 @pytest.mark.anyio
+async def test_azp_names_the_client_when_client_id_is_absent(settings):
+    access = await JWTVerifier(settings).verify_token(token(settings, client_id=None, azp="auth0-app"))
+    assert access.client_id == "auth0-app"
+
+
+@pytest.mark.anyio
 async def test_a_token_signed_by_another_key_is_rejected(settings):
     assert await JWTVerifier(settings).verify_token(token(settings, "writer", key=OTHER_KEY)) is None
 
