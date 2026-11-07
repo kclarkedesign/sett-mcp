@@ -119,7 +119,7 @@ _PAGE = """<!doctype html>
   <section id="consent" hidden>
     <h1><span id="client"></span> wants to use <span data-name></span></h1>
     <p>Signed in as <strong id="user"></strong>. If you allow it, the app can use this server's tools for you, within your role.</p>
-    <p class="note">After you answer, you'll be sent to:<br><span class="return" id="return"></span></p>
+    <p class="note">After you answer, you'll be sent to <strong id="return-host"></strong>:<br><span class="return" id="return"></span></p>
     <p class="note">Only allow it if you just started signing in from that app.</p>
     <div class="row">
       <button id="deny" type="button">Deny</button>
@@ -197,9 +197,12 @@ _PAGE = """<!doctype html>
     if (!data.authorization_id) return location.assign(data.redirect_url);  // already allowed before
     $("client").textContent = data.client.name || "An app";
     $("user").textContent = data.user.email || "your account";
-    let target = data.redirect_uri;
-    try { const u = new URL(data.redirect_uri); target = u.protocol === "https:" || u.protocol === "http:" ? u.host + u.pathname : data.redirect_uri; } catch (e) {}
-    $("return").textContent = target;
+    // The full address, query included, since that's exactly where the answer goes; the
+    // host is repeated in bold because it's what decides who receives it.
+    let host = "";
+    try { host = new URL(data.redirect_uri).host; } catch (e) {}
+    $("return-host").textContent = host || "this address";
+    $("return").textContent = data.redirect_uri;
     show("consent");
   })().catch((e) => fail("Something went wrong: " + e.message));
 })();
