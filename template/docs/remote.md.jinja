@@ -28,7 +28,7 @@ All of them are environment variables. Remote mode is off until an issuer is set
 | `{{ env_prefix }}_WRITER_CLAIM` / `_WRITER_VALUE` | Change which claim grants writes (default `app_metadata.sett_role` = `writer`) |
 | `{{ env_prefix }}_ENABLE_WRITES` | Still the ceiling: without it, no one can write |
 
-A half-configured server refuses to start: an issuer without a public URL or a shared key is an error, not a warning.
+A half-configured server refuses to start: an issuer without a public URL or a shared key is an error, not a warning. Every URL must use `https` (plain `http` is accepted only for `localhost`, such as a local Supabase), because signing keys, tokens and the audit secret travel over them.
 
 **Rotating the request-state key** without breaking confirmations in flight takes three deploys, each fully rolled out before the next. The first key in the list seals new state, and every key in the list can open it:
 

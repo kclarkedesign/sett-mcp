@@ -132,6 +132,16 @@ def test_host_names_are_lowercased_for_the_host_and_origin_checks():
     assert settings.allowed_origins == ("https://mcp.example.com", "https://mcp.acme.dev")
 
 
+def test_plain_http_is_allowed_only_on_this_machine():
+    local = {
+        **ENV,
+        f"{PREFIX}_PUBLIC_URL": "http://localhost:8000",
+        f"{PREFIX}_SUPABASE_URL": "http://127.0.0.1:54321",
+    }
+    settings = RemoteSettings.from_env(PREFIX, local)
+    assert settings.issuer == "http://127.0.0.1:54321/auth/v1"
+
+
 def test_public_url_falls_back_to_vercels_production_url():
     env = {k: v for k, v in ENV.items() if not k.endswith("_PUBLIC_URL")}
     settings = RemoteSettings.from_env(PREFIX, {**env, "VERCEL_PROJECT_PRODUCTION_URL": "srv.vercel.app"})
@@ -142,7 +152,10 @@ def test_public_url_falls_back_to_vercels_production_url():
     ("change", "message"),
     [
         ({f"{PREFIX}_PUBLIC_URL": ""}, "PUBLIC_URL is required"),
-        ({f"{PREFIX}_PUBLIC_URL": "http://mcp.example.com"}, "must use https"),
+        ({f"{PREFIX}_PUBLIC_URL": "http://mcp.example.com"}, "PUBLIC_URL must be an https URL"),
+        ({f"{PREFIX}_SUPABASE_URL": "http://ref.supabase.co"}, "SUPABASE_URL must be an https URL"),
+        ({f"{PREFIX}_AUTH_ISSUER": "http://issuer.example.com"}, "AUTH_ISSUER must be an https URL"),
+        ({f"{PREFIX}_AUTH_JWKS_URL": "http://keys.example.com/jwks.json"}, "AUTH_JWKS_URL must be an https URL"),
         ({f"{PREFIX}_PUBLIC_URL": "https://example.com/tools"}, "no path"),
         ({f"{PREFIX}_REQUEST_STATE_KEY": ""}, "REQUEST_STATE_KEY is required"),
         ({f"{PREFIX}_REQUEST_STATE_KEY": "x"}, "at least 32"),

@@ -63,6 +63,17 @@ class RemoteConfigError(ValueError):
     """Remote mode is half-configured: something it needs to run safely is missing."""
 
 
+_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+
+
+def _require_https(name: str, url: str) -> None:
+    """Refuse plain http except on this machine: keys, tokens and secrets travel over these URLs."""
+    parts = urlsplit(url)
+    if parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in _LOOPBACK):
+        return
+    raise RemoteConfigError(f"{name} must be an https URL: {url}")
+
+
 class _SigningKeys(Protocol):
     def get_signing_key_from_jwt(self, token: str) -> Any: ...
 
@@ -111,8 +122,7 @@ class RemoteSettings:
         if not public_url:
             raise RemoteConfigError(f"{prefix}_PUBLIC_URL is required when sign-in is configured")
         parts = urlsplit(public_url)
-        if parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1"):
-            raise RemoteConfigError(f"{prefix}_PUBLIC_URL must use https: {public_url}")
+        _require_https(f"{prefix}_PUBLIC_URL", public_url)
         if parts.path not in ("", "/") or parts.query or parts.fragment:
             # The server answers at <host>/mcp, and tokens are checked against that URL.
             raise RemoteConfigError(f"{prefix}_PUBLIC_URL must be just the scheme and host, with no path: {public_url}")
@@ -136,6 +146,12 @@ class RemoteSettings:
             if supabase and not get("AUTH_ISSUER")
             else f"{issuer.rstrip('/')}/.well-known/jwks.json"
         )
+        # Over plain http, an attacker on the network could swap the signing keys (and so
+        # forge sign-ins) or read the audit table's secret key.
+        if supabase:
+            _require_https(f"{prefix}_SUPABASE_URL", supabase)
+        _require_https(f"{prefix}_AUTH_ISSUER", issuer)
+        _require_https(f"{prefix}_AUTH_JWKS_URL", jwks_url)
         # Host names are case-insensitive, but the SDK compares Host and Origin headers
         # exactly, and clients send them in lowercase.
         host = parts.netloc.lower()
