@@ -169,9 +169,11 @@ _PAGE = """<!doctype html>
 
   async function answer(approve) {
     $("allow").disabled = $("deny").disabled = true;
-    const call = approve ? sb.auth.oauth.approveAuthorization(id) : sb.auth.oauth.denyAuthorization(id);
-    const { error } = await call;  // on success Supabase sends the browser back to the app
-    if (error) fail("Couldn't record your answer: " + error.message);
+    const options = { skipBrowserRedirect: true };  // redirect here, whatever the library version does
+    const call = approve ? sb.auth.oauth.approveAuthorization(id, options) : sb.auth.oauth.denyAuthorization(id, options);
+    const { data, error } = await call;
+    if (error || !data || !data.redirect_url) return fail("Couldn't record your answer: " + (error ? error.message : "no address to return to"));
+    location.assign(data.redirect_url);  // back to the app, with a code (Allow) or an access_denied error (Deny)
   }
   $("allow").onclick = () => answer(true);
   $("deny").onclick = () => answer(false);

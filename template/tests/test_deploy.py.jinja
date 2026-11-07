@@ -163,6 +163,19 @@ def test_request_state_key_is_kept_across_deploys(run):
     assert f"{PREFIX}_REQUEST_STATE_KEY" not in vercel.env
 
 
+def test_a_deploy_without_writes_closes_the_write_gate(run):
+    _, _, vercel = run(vercel=FakeVercel(existing_env={f"{PREFIX}_ENABLE_WRITES"}))
+    assert vercel.env[f"{PREFIX}_ENABLE_WRITES"] == "false"
+
+
+def test_legacy_service_role_keys_are_sent_as_bearer_to_the_admin_api():
+    legacy = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig"
+    supabase = FakeSupabase(keys=[{"type": "legacy", "name": "service_role", "api_key": legacy}])
+    deploy.add_user(Supabase("token", REF, supabase), "ada@example.org", writer=False, say=lambda _: None)
+    headers = supabase.sent("POST", "/auth/v1/admin/users")[0][2]
+    assert headers["apikey"] == legacy and headers["Authorization"] == f"Bearer {legacy}"
+
+
 def test_writes_and_github_only_when_asked(run):
     _, supabase, vercel = run(enable_writes=True, github_client_id="gh-id", github_secret="gh-secret")
     assert vercel.env[f"{PREFIX}_ENABLE_WRITES"] == "true"

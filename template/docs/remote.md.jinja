@@ -22,7 +22,7 @@ It prints each step and ends with the address to connect clients to, `https://<y
 
 | Option | What it does |
 |---|---|
-| `--writes` | Lets users with the writer role write (sets `{{ env_prefix }}_ENABLE_WRITES=true`) |
+| `--writes` | Lets users with the writer role write (sets `{{ env_prefix }}_ENABLE_WRITES=true`). Every deploy without it turns writes off |
 | `--github-client-id <id>` | Turns on GitHub sign-in; the secret comes from `GITHUB_CLIENT_SECRET` or a prompt |
 | `--vercel-project <name>` | The Vercel project to create or reuse (default `{{ project_slug }}`) |
 | `--scope <team>` | A Vercel team instead of your personal account |

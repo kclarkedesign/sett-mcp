@@ -147,6 +147,10 @@ class Supabase:
         """Add a confirmed user. False if one with that email already exists."""
         body = json.dumps({"email": email, "email_confirm": True, "app_metadata": app_metadata}).encode()
         headers = {"apikey": secret_key, "Content-Type": "application/json"}
+        if secret_key.count(".") == 2:
+            # A legacy service_role key is a JWT, and Auth's admin API reads it as a bearer
+            # token. The current `sb_secret_...` keys are opaque and go in `apikey` alone.
+            headers["Authorization"] = f"Bearer {secret_key}"
         status, raw = self._request("POST", f"{self.url}/auth/v1/admin/users", headers, body)
         if status == 422 and b"exists" in raw:
             return False
@@ -343,6 +347,10 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
         settings[f"{prefix}_REQUEST_STATE_KEY"] = secrets.token_urlsafe(48)
     if options.enable_writes:
         settings[f"{prefix}_ENABLE_WRITES"] = "true"
+    elif f"{prefix}_ENABLE_WRITES" in existing:
+        # Each deploy states the write gate: without --writes it is closed, even if an
+        # earlier deploy opened it.
+        settings[f"{prefix}_ENABLE_WRITES"] = "false"
     for name, value in settings.items():
         vercel.set_env(name, value)
         say(f"    set {name}")
@@ -409,7 +417,7 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     say(f"  {step}. Add the people who may sign in (new sign-ups are off):")
     say(f"       {options.command} users add you@example.com --writer".rstrip())
     if not options.enable_writes:
-        say(f"  {step + 1}. Writes are off. To allow writers to write, run the deploy again with --writes")
+        say(f"  {step + 1}. Writes are off. To let writers write, run the deploy again with --writes (every deploy without it turns writes off)")
     return resource
 
 
