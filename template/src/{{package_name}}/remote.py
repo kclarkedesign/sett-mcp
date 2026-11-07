@@ -5,6 +5,7 @@ of it stays off unless an authorization server is configured:
 
     <PREFIX>_SUPABASE_URL          https://<ref>.supabase.co (sets issuer, keys and audit table)
     <PREFIX>_SUPABASE_SECRET_KEY   writes audit rows to the `sett_audit` table
+    <PREFIX>_SUPABASE_PUBLISHABLE_KEY  serves the sign-in consent page at /oauth/consent
     <PREFIX>_AUTH_ISSUER           any other OAuth 2.1 / OIDC issuer, instead of Supabase
     <PREFIX>_AUTH_JWKS_URL         its public keys (default: <issuer>/.well-known/jwks.json)
     <PREFIX>_PUBLIC_URL            https://your-server.example (default: Vercel's production URL)
@@ -51,6 +52,10 @@ create table if not exists public.{AUDIT_TABLE} (
   client_id text
 );
 alter table public.{AUDIT_TABLE} enable row level security;
+-- Newer projects don't grant API roles access to tables made in SQL. The server writes
+-- with the secret key (service_role), and only inserts; nothing else can read or write.
+grant usage on schema public to service_role;
+grant insert on table public.{AUDIT_TABLE} to service_role;
 """.strip()
 
 # Every standard asymmetric JWS algorithm (RFC 7518, RFC 8037). Shared-secret (HS*) and
@@ -87,8 +92,9 @@ class RemoteSettings:
     allowed_hosts: tuple[str, ...]
     writer_claim: str = "app_metadata.sett_role"
     writer_value: str = "writer"
-    audit_url: str | None = None
+    supabase_url: str | None = None
     audit_key: str | None = None
+    publishable_key: str | None = None
 
     @property
     def resource_url(self) -> str:
@@ -165,8 +171,9 @@ class RemoteSettings:
             allowed_hosts=(host, *extra_hosts),
             writer_claim=get("WRITER_CLAIM") or cls.writer_claim,
             writer_value=get("WRITER_VALUE") or cls.writer_value,
-            audit_url=supabase or None,
+            supabase_url=supabase or None,
             audit_key=get("SUPABASE_SECRET_KEY") or None,
+            publishable_key=get("SUPABASE_PUBLISHABLE_KEY") or None,
         )
 
     def is_writer(self, token: AccessToken | None) -> bool:

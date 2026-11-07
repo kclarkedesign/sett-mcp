@@ -41,7 +41,7 @@ Plus the plumbing that usually takes an afternoon:
 - A runnable example (a small contacts store) you replace with your real API client
 - `install-claude-desktop` command that writes the config for macOS, Windows and Linux
 - Stdio by default, stateless Streamable HTTP with `serve --http`, tested against the edge cases that break real clients
-- Remote mode: sign-in through Supabase or any OAuth provider, a writer role for write tools, confirmations that work across server instances, and an audit table
+- **Remote in one command:** `deploy vercel --auth supabase` hosts the server on your own Vercel account with Supabase for sign-in: a consent page, invite-only users, a writer role for write tools, confirmations that work across server instances, and an audit table. Remote mode also works with any OAuth provider on any host
 - Setup instructions for Claude Desktop, Claude Code, Cursor, the MCP Inspector and Docker
 - Tests that drive the server through a real MCP client on both protocol versions
 - GitHub Actions for CI and PyPI publishing, so users can run `uvx your-server`
@@ -55,6 +55,13 @@ uvx sett-mcp new my-server
 cd my-server
 uv run --extra dev pytest                  # the guardrail test suite
 uv run my-server install-claude-desktop    # then restart Claude Desktop
+```
+
+To host it for others, with sign-in, on your own Vercel and Supabase accounts:
+
+```bash
+uv run my-server deploy vercel --auth supabase --supabase-project <ref>
+uv run my-server users add you@example.com --writer
 ```
 
 Copier asks for a name, tool prefix and environment-variable prefix. Everything else is filled in.
@@ -81,14 +88,15 @@ Tested in November 2026 with the example server this template generates:
 | Client | Tools and masking | Confirmation prompts |
 |---|---|---|
 | Claude Code | ✅ | ✅ Shows an Accept / Decline prompt, including in auto mode |
+| Claude on the web (claude.ai, remote connector) | ✅ | ✅ Shows a "requests your input" card with Submit / Decline. Tested against a server deployed with `deploy vercel --auth supabase` |
 | Cursor | ✅ | ✅ Shows a Submit / Cancel prompt. Answer it promptly: Cursor gives up on a call that waits too long, then retries |
-| Codex (desktop app; CLI 0.153 and 0.167) | ✅ | ⛔ Declines automatically without showing a prompt, so tools that need confirmation never run ([openai/codex#60158](https://github.com/openai/codex/issues/60158)) |
+| Codex CLI 0.167 | ✅ | ✅ Shows an Allow / Deny / Cancel prompt, after Codex's own approval for the tool call. Sett 0.2 and earlier sent a form schema Codex rejects, so it cancelled without asking ([openai/codex#60158](https://github.com/openai/codex/issues/60158)) |
 | Claude Desktop 4.x (Windows) | ✅ | ⛔ No prompt shown, so tools that need confirmation are refused and nothing changes |
 
 What that means in practice:
 
 - **A confirmation is only as strong as the client.** Sett can't tell a person clicking Accept from a client that accepts automatically. The write gate and the allow / deny lists don't depend on the client at all, so treat those as the hard limits.
-- **In clients without prompts** (Codex and Claude Desktop today), keep the default `confirm: destructive`. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
+- **In clients without prompts** (Claude Desktop today), keep the default `confirm: destructive`. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
 - **Claude may refuse on its own.** In our tests Claude sometimes declined to call a tool described as permanently deleting data, or asked in chat first. That's a welcome extra layer, but it depends on the model and the conversation, which is why the server enforces confirmation itself.
 
 Tried another client? Open an issue with what you saw and we'll add it to the table.
@@ -109,9 +117,9 @@ SDK v2 renamed `FastMCP` to `MCPServer` and changed a dozen other things. See [d
 
 ## Roadmap
 
-- **Remote in one command:** `deploy vercel --auth supabase`, which hosts the server on your own Vercel project with Supabase handling sign-in. The server side (sign-in, writer role, audit table) is in; the deploy command is next
+- A preflight `sett-mcp check` that tests a running server against real clients' quirks
 - One-click `.mcpb` bundles for Claude Desktop
-- Cloudflare Workers deploy target
+- More deploy targets: Cloudflare Workers, Cloud Run, Fly
 - Example connectors, starting with a read-only Salesforce analyst server
 
 ## Contributing

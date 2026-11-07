@@ -2,7 +2,84 @@
 
 Locally, each person runs their own copy over stdio. Remotely, one copy runs at a public URL, everyone you invite connects to `https://<your-host>/mcp` from Claude, Cursor or another client, and every request must carry a sign-in.
 
-The one-command deploy (`{{ project_slug }} deploy vercel --auth supabase`) is coming next and will set all of this up. This page explains what it configures, so you can also run it by hand or on another host.
+`{{ project_slug }} deploy vercel --auth supabase` sets all of this up on your own Vercel and Supabase accounts. The rest of this page explains what it configures, so you can also do it by hand or on another host.
+
+## Deploy in one command
+
+You need, once:
+
+1. **The Vercel CLI, logged in:** `npm install -g vercel`, then `vercel login`.
+2. **A Supabase project used only for this server** (the free plan works). Its *ref* is the 20 letters in its dashboard URL, `supabase.com/dashboard/project/<ref>`. The deploy changes the project's sign-in settings, so don't share it with a website. When creating it, keep **Enable Data API** on (the server writes audit rows through it); the other security options can be left as Supabase recommends.
+3. **A Supabase personal access token:** Account, Access Tokens, *Generate new token*. Set it as `SUPABASE_ACCESS_TOKEN`, or paste it when asked. It isn't saved anywhere.
+
+Then, from this folder:
+
+```bash
+uv run {{ project_slug }} deploy vercel --auth supabase --supabase-project <ref>
+```
+
+It prints each step and ends with the address to connect clients to, `https://<your-project>.vercel.app/mcp`. Run it again any time: it checks what's already there, keeps the shared confirmation key, and saves the project names (no secrets) in `sett-deploy.json` so later runs need no flags.
+
+| Option | What it does |
+|---|---|
+| `--writes` | Lets users with the writer role write (sets `{{ env_prefix }}_ENABLE_WRITES=true`). Every deploy without it turns writes off |
+| `--github-client-id <id>` | Turns on GitHub sign-in; the secret comes from `GITHUB_CLIENT_SECRET` or a prompt |
+| `--vercel-project <name>` | The Vercel project to create or reuse (default `{{ project_slug }}`) |
+| `--scope <team>` | The Vercel team to deploy in (default: the CLI's current team, which the deploy prints). `vercel teams ls` lists them |
+| `--yes` | Replace the Supabase project's Site URL if it already points somewhere else |
+
+What it does, in order:
+
+1. Checks your Vercel login, the token, and that the project signs tokens with public keys (not a shared secret).
+2. Reads the project's publishable and secret keys, creating a secret key named `sett_server` if there is none.
+3. Links the Vercel project and sets `{{ env_prefix }}_SUPABASE_URL`, `_SUPABASE_PUBLISHABLE_KEY`, `_SUPABASE_SECRET_KEY` and a new `_REQUEST_STATE_KEY` as production environment variables.
+4. Deploys to production and asks the running server which address it answers for.
+5. Creates the `sett_audit` table and the token hook (below), with that address.
+6. Turns on Supabase's OAuth server with dynamic client registration, points it at this server's consent page, turns on the token hook, and turns off open sign-ups.
+7. Checks that `/mcp` answers `401` without a sign-in and the consent page loads, then saves `sett-deploy.json`.
+
+**Free plans:** Vercel's Hobby plan is for non-commercial use, so a server for a business needs Vercel Pro. A free Supabase project pauses after about a week without activity, and sign-in stops until you restore it in the dashboard; check both providers' current terms before relying on a free plan.
+
+### Who can sign in
+
+New sign-ups are off, so add people first. They sign in with GitHub (using the same email) or a link sent to their email:
+
+```bash
+uv run {{ project_slug }} users add ada@example.com --writer   # may sign in and write
+uv run {{ project_slug }} users add bob@example.com            # may sign in and read
+uv run {{ project_slug }} users grant bob@example.com          # make a writer
+uv run {{ project_slug }} users revoke bob@example.com         # back to reader
+uv run {{ project_slug }} users list
+```
+
+A role change applies when the person's client next refreshes its sign-in (within an hour), or right away if they sign in again. These commands use the same access token as the deploy and change `app_metadata.sett_role`; if you changed `{{ env_prefix }}_WRITER_CLAIM`, set roles your own way.
+
+Supabase's built-in email sender only delivers to members of your Supabase organization and is rate-limited. To send sign-in links to anyone else, add your own SMTP server (Authentication, Emails), or use GitHub sign-in.
+
+### GitHub sign-in
+
+About five minutes, once:
+
+1. On GitHub, open **Settings, Developer settings, OAuth Apps, New OAuth App** (github.com/settings/applications/new).
+2. **Homepage URL:** your server's address, `https://<your-project>.vercel.app`. **Authorization callback URL:** `https://<ref>.supabase.co/auth/v1/callback`. Leave *Enable Device Flow* off, and register it.
+3. Copy the **Client ID**, then *Generate a new client secret* and copy it.
+4. Run the deploy again with `--github-client-id <client id>`, and paste the secret when asked (or set `GITHUB_CLIENT_SECRET`).
+
+GitHub sign-in links to the user you added with the same email, so `users add` comes first.
+
+### Connecting clients
+
+Add `https://<your-project>.vercel.app/mcp` as a remote (custom) connector in Claude, Cursor or another client. The client registers itself, sends you to the consent page to sign in and allow it, and then calls tools as you. Confirmations work as they do locally; the [client support table](https://github.com/kclarkedesign/sett-mcp#client-support) lists which clients can show them.
+
+### A custom domain
+
+Add the domain in Vercel, make it the production domain, and run the deploy again: it reads the new address, updates the token hook and the Site URL, and checks the server. Tokens issued for the old address stop working, so clients sign in once more.
+
+### If something goes wrong
+
+- **"The server didn't come up"**: run `vercel logs <your-project>.vercel.app`. A missing or malformed setting is named there.
+- **Signing in shows "Signups not allowed"**: the email isn't added yet (`users add`), or the GitHub account's email differs from the one you added.
+- **Clients connect but every call is refused**: the token hook may be missing its address after a domain change; run the deploy again.
 
 ## What remote mode adds
 
@@ -20,6 +97,7 @@ All of them are environment variables. Remote mode is off until an issuer is set
 |---|---|
 | `{{ env_prefix }}_SUPABASE_URL` | `https://<ref>.supabase.co`. Sets the issuer (`/auth/v1`), its public keys and the audit table's address |
 | `{{ env_prefix }}_SUPABASE_SECRET_KEY` | Lets the server write audit rows. Keep it secret |
+| `{{ env_prefix }}_SUPABASE_PUBLISHABLE_KEY` | Serves the sign-in consent page at `/oauth/consent` (this key is public by design) |
 | `{{ env_prefix }}_AUTH_ISSUER` | Any other OAuth 2.1 / OpenID issuer, instead of Supabase |
 | `{{ env_prefix }}_AUTH_JWKS_URL` | That issuer's public keys, if not at `<issuer>/.well-known/jwks.json` |
 | `{{ env_prefix }}_PUBLIC_URL` | `https://<your-host>`, with no path (the server answers at `/mcp`). On Vercel it defaults to the production URL |
@@ -50,13 +128,13 @@ To try remote mode on your machine, set the variables above with `{{ env_prefix 
 
 ## What Supabase needs
 
-The deploy command will do these for you. By hand, in a Supabase project used only for this server:
+The deploy does these for you. By hand, in a Supabase project used only for this server:
 
-1. Turn on the **OAuth server** (Authentication → OAuth Server) with dynamic client registration, so MCP clients can register themselves.
-2. Use **asymmetric signing keys** (ES256), so the server can check tokens with public keys.
-3. Add a **custom access token hook** that adds your server's URL (`https://<your-host>/mcp`) to the token's `aud`. Supabase always issues `aud: "authenticated"`, and the server requires its own URL there.
-4. Host the **consent page** Supabase redirects to during sign-in.
-5. Turn off **open sign-ups**, then invite users and set `app_metadata.sett_role = "writer"` for those who may write.
+1. Turn on the **OAuth server** (Authentication, OAuth Server) with dynamic client registration, so MCP clients can register themselves, and set its authorization path to `/oauth/consent`. Set the **Site URL** to your server's address.
+2. Use **asymmetric signing keys** (ES256; Authentication, JWT Keys), so the server can check tokens with public keys.
+3. Add a **custom access token hook** that adds your server's URL (`https://<your-host>/mcp`) to the token's `aud`. Supabase always issues `aud: "authenticated"`, and the server requires its own URL there. The hook only changes tokens issued to apps (they carry a `client_id`), so a website session from the same project is still refused. The SQL is `hook_sql()` in `src/{{ package_name }}/deploy.py`.
+4. Serve the **consent page**: set `{{ env_prefix }}_SUPABASE_PUBLISHABLE_KEY` and the server shows it at `/oauth/consent`. It can't be framed, loads one pinned script with an integrity check, and shows the app's name and return address as plain text, since whoever registers a client chooses both.
+5. Turn off **open sign-ups**, then add users and set `app_metadata.sett_role = "writer"` for those who may write.
 6. Create the `sett_audit` table (the SQL is `AUDIT_TABLE_SQL` in `src/{{ package_name }}/remote.py`).
 
 Supabase's OAuth server is in beta. Clients that sign in through it include Claude and Cursor; [Sett's client support table](https://github.com/kclarkedesign/sett-mcp#client-support) lists which of them can also show confirmation prompts.

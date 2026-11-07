@@ -40,6 +40,7 @@ import anyio.to_thread
 import yaml
 from mcp.server.mcpserver import (
     AcceptedElicitation,
+    CancelledElicitation,
     Context,
     Elicit,
     ElicitationResult,
@@ -164,10 +165,17 @@ def mask(value: Any, fields: frozenset[str]) -> Any:
     return value
 
 
+def _form_schema(schema: dict[str, Any]) -> None:
+    # A form's schema may only hold `type`, `properties` and `required` (MCP's
+    # ElicitRequestFormParams). Pydantic adds a top-level `title`, and strict clients
+    # such as Codex reject the whole form for it and cancel without showing a prompt.
+    schema.pop("title", None)
+
+
 # An empty form: the client's own Accept button is the confirmation. (No docstring, since
 # it would become the schema description and some clients display it.)
 class Confirmation(BaseModel):
-    pass
+    model_config = ConfigDict(json_schema_extra=_form_schema)
 
 
 class _ClientCannotConfirm(Confirmation):
@@ -342,6 +350,11 @@ class Guardrails:
                     "carry a confirmation prompt. Use a client that supports them, or set "
                     "`confirm: off` in the policy."
                 )
+            if isinstance(confirmation, CancelledElicitation):
+                # Cancelled: the prompt was dismissed, or the client couldn't show it. Not
+                # the same as the user saying no, so it's logged and reported separately.
+                await self._audit(tool, kind, kwargs, "cancelled", 0.0)
+                raise ToolError(f"{tool} was not run: the confirmation was cancelled (dismissed, or the client couldn't show it).")
             if not isinstance(confirmation, AcceptedElicitation):
                 await self._audit(tool, kind, kwargs, "declined", 0.0)
                 raise ToolError(f"{tool} was not run: the user declined.")

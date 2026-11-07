@@ -115,7 +115,18 @@ Return dicts or lists of dicts so masking can see field names.
 
 `uv run {{ project_slug }} serve --http` serves stateless Streamable HTTP at `http://127.0.0.1:8000/mcp`. Responses are plain JSON, GET answers 405 (a stateless server has no event stream), requests from other websites and unexpected Host headers are refused, and bodies over 4 MB are rejected.
 
-Without sign-in configured, keep HTTP mode on localhost. [docs/remote.md](docs/remote.md) explains remote mode: sign-in through Supabase or another OAuth provider, a writer role for write tools, confirmations that work across server instances, and an audit table.
+Without sign-in configured, keep HTTP mode on localhost.
+
+## Remote in one command
+
+Host it at a public URL on your own Vercel account, with Supabase handling sign-in:
+
+```bash
+uv run {{ project_slug }} deploy vercel --auth supabase --supabase-project <ref>
+uv run {{ project_slug }} users add you@example.com --writer
+```
+
+Then add `https://<your-project>.vercel.app/mcp` as a connector in Claude or Cursor. Every request needs a sign-in, only people you add can sign in, writes need the writer role, and each call lands in an audit table. [docs/remote.md](docs/remote.md) covers what you need first, GitHub sign-in, custom domains, and how to run remote mode on another host or with another OAuth provider.
 
 ## Publishing
 

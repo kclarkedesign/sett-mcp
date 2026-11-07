@@ -89,14 +89,33 @@ async def test_destructive_tool_runs_after_user_confirms(mode):
 
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
-@pytest.mark.parametrize("action", ["decline", "cancel"])
-async def test_destructive_tool_does_nothing_when_user_declines(mode, action):
+@pytest.mark.parametrize(("action", "reported"), [("decline", "the user declined"), ("cancel", "was cancelled")])
+async def test_destructive_tool_does_nothing_when_user_declines(mode, action, reported):
     server, store = make_server(writes_enabled=True)
     async with Client(server, mode=mode, elicitation_callback=answering(action)) as client:
         result = await client.call_tool(DELETE, {"contact_id": "c1"})
     assert result.is_error
-    assert "declined" in result.content[0].text
+    assert reported in result.content[0].text  # a cancel is never reported as a decline
     assert store.get("c1")
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+async def test_confirmation_form_uses_only_fields_the_spec_allows(mode):
+    # Codex rejects a form schema with any other top-level key (such as pydantic's
+    # `title`) and cancels without showing the prompt.
+    server, _ = make_server(writes_enabled=True)
+    schemas = []
+
+    async def callback(context, params):
+        schemas.append(params.requested_schema)
+        return ElicitResult(action="accept", content={})
+
+    async with Client(server, mode=mode, elicitation_callback=callback) as client:
+        await client.call_tool(DELETE, {"contact_id": "c1"})
+    (schema,) = schemas
+    dumped = schema if isinstance(schema, dict) else schema.model_dump(by_alias=True, exclude_none=True)
+    assert set(dumped) <= {"$schema", "type", "properties", "required"}
+    assert dumped["type"] == "object"
 
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
