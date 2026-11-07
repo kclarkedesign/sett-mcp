@@ -66,13 +66,18 @@ def http_request(method: str, url: str, headers: Mapping[str, str], body: bytes 
 
 
 def run_command(argv: list[str], stdin: str | None) -> tuple[int, str, str]:
+    """Run a CLI, reading what it prints on stdout.
+
+    Its stderr goes straight to your terminal, and so does your keyboard unless a value is
+    piped in, so its progress, warnings and any question it asks stay visible and answerable.
+    """
     executable = shutil.which(argv[0])
     if executable is None:
         raise DeployError(f"`{argv[0]}` isn't installed. For Vercel: npm install -g vercel, then vercel login")
     done = subprocess.run(  # noqa: S603 (fixed executable, no shell)
-        [executable, *argv[1:]], input=stdin, capture_output=True, text=True, encoding="utf-8", check=False
+        [executable, *argv[1:]], input=stdin, stdout=subprocess.PIPE, text=True, encoding="utf-8", check=False
     )
-    return done.returncode, done.stdout, done.stderr
+    return done.returncode, done.stdout, ""
 
 
 def project_ref(value: str) -> str:
@@ -174,7 +179,8 @@ class Vercel:
         code, out, err = self._run(argv, stdin)
         if code != 0 and check:
             tail = (err or out).strip().splitlines()[-3:]
-            raise DeployError(f"`vercel {args[0]}` failed: " + " / ".join(tail))
+            detail = " / ".join(tail) if tail else "see its message above"
+            raise DeployError(f"`vercel {' '.join(args[:2])}` failed: {detail}")
         return out
 
     def whoami(self) -> str:
