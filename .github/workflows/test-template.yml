@@ -31,6 +31,28 @@ jobs:
         working-directory: ${{ runner.temp }}/ci-check-mcp
         run: uv run --extra dev pytest
 
+  docker:
+    # Builds the generated project's Dockerfile and lists its tools over stdio,
+    # the way MCP directories such as Glama start a server.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Render
+        run: uvx copier copy --trust --defaults --vcs-ref HEAD . "$RUNNER_TEMP/docker-check"
+      - name: Build image
+        run: docker build -t docker-check "$RUNNER_TEMP/docker-check"
+      - name: List tools over stdio
+        run: |
+          init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          { printf '%s\n' "$init" '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 5; } \
+            | docker run --rm -i docker-check > out.jsonl
+          cat out.jsonl
+          grep -q '"acme_search_contacts"' out.jsonl
+          ! grep -q '"acme_delete_contact"' out.jsonl  # writes are off by default
+
   cli:
     runs-on: ubuntu-latest
     steps:

@@ -1,5 +1,7 @@
 # {{ project_name }}
 
+<!-- mcp-name: io.github.{{ github_user }}/{{ project_slug }} -->
+
 {{ description }}
 
 Built with [Sett](https://github.com/kclarkedesign/sett-mcp) on the official MCP Python SDK v2. It is **read-only until you say otherwise**:
@@ -17,16 +19,43 @@ Built with [Sett](https://github.com/kclarkedesign/sett-mcp) on the official MCP
 
 ```bash
 uv run --extra dev pytest                       # the guardrails, tested
-uv run {{ project_slug }} install-claude-desktop  # then restart Claude Desktop
+uv run {{ project_slug }} install-claude-desktop  # then fully quit and reopen Claude Desktop
 ```
 
-For Claude Code:
+Ask Claude to "search contacts for Northwind." Emails and phone numbers come back masked.
+
+## Connect a client
+
+**Claude Desktop:** `uv run {{ project_slug }} install-claude-desktop` adds the server to every Claude Desktop config it finds (macOS, Windows, including newer Windows installs, and Linux), backing each one up first. Add `--dry-run` to see the change without writing it.
+
+**Claude Code:** from this folder,
 
 ```bash
 claude mcp add {{ project_slug }} -- uv run --directory "$PWD" {{ project_slug }}
 ```
 
-Ask Claude to "search contacts for Northwind." Emails and phone numbers come back masked.
+**Cursor:** add this to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project, with the absolute path to this folder:
+
+```json
+{
+  "mcpServers": {
+    "{{ project_slug }}": {
+      "command": "uv",
+      "args": ["run", "--directory", "/absolute/path/to/{{ project_slug }}", "{{ project_slug }}"]
+    }
+  }
+}
+```
+
+**MCP Inspector**, to try tools by hand:
+
+```bash
+npx @modelcontextprotocol/inspector uv run {{ project_slug }}
+```
+
+**Docker:** `docker build -t {{ project_slug }} .` then `docker run --rm -i {{ project_slug }}`. The container speaks MCP over stdio, the same way the clients above start it.
+
+Whichever client you use, writes stay off until you add `{{ env_prefix }}_ENABLE_WRITES=true` to the server's environment (for Claude Code, `claude mcp add ... -e {{ env_prefix }}_ENABLE_WRITES=true -- ...`). Whether a client can show confirmation prompts varies; see [Sett's client support table](https://github.com/kclarkedesign/sett-mcp#client-support).
 
 ## Turning on writes
 
@@ -82,13 +111,9 @@ async def void_invoice(invoice_id: str) -> dict:
 
 Return dicts or lists of dicts so masking can see field names.
 
-## Testing by hand
+## HTTP mode
 
-```bash
-npx @modelcontextprotocol/inspector uv run {{ project_slug }}
-```
-
-Or run over HTTP with `uv run {{ project_slug }} serve --http` and point the Inspector at `http://127.0.0.1:8000/mcp`. HTTP mode has no authentication yet, so keep it on localhost.
+`uv run {{ project_slug }} serve --http` serves stateless Streamable HTTP at `http://127.0.0.1:8000/mcp`. Responses are plain JSON, GET answers 405 (a stateless server has no event stream), requests from other websites and unexpected Host headers are refused, and bodies over 4 MB are rejected. HTTP mode has no authentication yet, so keep it on localhost.
 
 ## Publishing
 
@@ -97,6 +122,8 @@ Push a tag like `v0.1.0` and the release workflow publishes to PyPI (set up [tru
 ```bash
 uvx {{ project_slug }}
 ```
+
+[docs/publishing.md](docs/publishing.md) walks through PyPI, listing on Glama, the awesome-mcp-servers list and the official MCP Registry.
 
 ## How confirmations work
 

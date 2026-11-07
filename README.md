@@ -40,10 +40,12 @@ Plus the plumbing that usually takes an afternoon:
 
 - A runnable example (a small contacts store) you replace with your real API client
 - `install-claude-desktop` command that writes the config for macOS, Windows and Linux
-- Stdio by default, stateless Streamable HTTP with `serve --http`
+- Stdio by default, stateless Streamable HTTP with `serve --http`, tested against the edge cases that break real clients
+- Setup instructions for Claude Desktop, Claude Code, Cursor, the MCP Inspector and Docker
 - Tests that drive the server through a real MCP client on both protocol versions
 - GitHub Actions for CI and PyPI publishing, so users can run `uvx your-server`
-- A `CLAUDE.md` that keeps Claude Code from bypassing the guardrails when it adds tools
+- A `Dockerfile`, `glama.json` and a publishing guide for PyPI, Glama, the awesome-mcp-servers list and the official MCP Registry
+- A `CLAUDE.md` that keeps Claude Code from bypassing the guardrails when it adds tools, and shows it how to describe tools well
 
 ## Quick start
 

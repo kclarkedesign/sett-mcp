@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
@@ -36,6 +38,35 @@ def build_server(policy: Policy | None = None, store: ContactStore | None = None
         "enabled" if policy.writes_enabled else "disabled",
     )
     return server
+
+
+def http_app(server: MCPServer, host: str = "127.0.0.1") -> Any:
+    """The server as a stateless Streamable HTTP app, served at /mcp.
+
+    Stateless means any replica can answer any request, and responses are plain JSON.
+    A stateless server has no event stream to offer, so GET /mcp answers 405 instead of
+    holding an empty stream open. The SDK's checks stay in place: requests from other
+    websites (Origin) and unexpected Host headers are refused, and bodies over 4 MB are
+    rejected.
+    """
+    app = server.streamable_http_app(stateless_http=True, json_response=True, host=host)
+    not_allowed = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Method Not Allowed: this server is stateless; POST requests to /mcp."},
+        }
+    ).encode()
+
+    async def asgi(scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"].rstrip("/") == "/mcp":
+            headers = [(b"content-type", b"application/json"), (b"allow", b"POST")]
+            await send({"type": "http.response.start", "status": 405, "headers": headers})
+            await send({"type": "http.response.body", "body": not_allowed})
+            return
+        await app(scope, receive, send)
+
+    return asgi
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -72,7 +103,9 @@ def main(argv: list[str] | None = None) -> None:
             args.host,
             args.port,
         )
-        server.run("streamable-http", host=args.host, port=args.port, stateless_http=True, json_response=True)
+        import uvicorn
+
+        uvicorn.run(http_app(server, host=args.host), host=args.host, port=args.port, log_level="info")
     else:
         server.run()
 

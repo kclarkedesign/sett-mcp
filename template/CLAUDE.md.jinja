@@ -8,11 +8,17 @@ MCP server on the official Python SDK v2 (`mcp>=2.2`, `MCPServer`, not v1's `Fas
 - `src/{{ package_name }}/store.py`: sample data backend; replace with the real API client.
 - `src/{{ package_name }}/default_policy.yaml`: bundled policy.
 - `tests/test_guardrails.py`: behavior tests through a real MCP client.
+- `tests/test_http.py`: HTTP mode edge cases and the SDK's Origin and Host checks.
+- `Dockerfile`, `glama.json`, `docs/publishing.md`: publishing to PyPI, Glama and the MCP Registry.
 
 ## Rules
 - Never register a tool with `server.tool()` or `server.add_tool()` directly; that bypasses the guardrails.
 - Anything that changes data is `guard.write(...)`. Deletes, voids and overwrites are `destructive=True` with a specific `confirm_message`.
-- Tool names start with `{{ tool_prefix }}_`. The docstring is the tool description the model reads: say what it does and what it returns.
+- Tool names start with `{{ tool_prefix }}_`.
+- Describe every tool for the model, following the examples in `tools.py`:
+  - The docstring's first line says what the tool does. The rest says when to use it instead of a similar tool (search vs get), what it returns, and any precondition (search before create).
+  - Every parameter gets `Annotated[type, Field(description=...)]`, including the format of ids and the allowed range of numbers (`Field(ge=1, le=100)`). Shared parameter types live at the top of `tools.py`.
+  - Directories such as Glama score tools on these points, and models pick tools by them.
 - Return dicts or lists of dicts so field masking can see field names.
 - Raise `ToolError` for failures the model should see and react to (not found, bad input). `MCPError` becomes a protocol error instead.
 - Never log to stdout: over stdio, stdout is the protocol channel.
