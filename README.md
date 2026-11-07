@@ -57,6 +57,13 @@ uv run --extra dev pytest                  # the guardrail test suite
 uv run my-server install-claude-desktop    # then restart Claude Desktop
 ```
 
+To host it for others, with sign-in, on your own Vercel and Supabase accounts:
+
+```bash
+uv run my-server deploy vercel --auth supabase --supabase-project <ref>
+uv run my-server users add you@example.com --writer
+```
+
 Copier asks for a name, tool prefix and environment-variable prefix. Everything else is filled in.
 
 Adding a tool looks like this:
@@ -81,6 +88,7 @@ Tested in November 2026 with the example server this template generates:
 | Client | Tools and masking | Confirmation prompts |
 |---|---|---|
 | Claude Code | ✅ | ✅ Shows an Accept / Decline prompt, including in auto mode |
+| Claude on the web (claude.ai, remote connector) | ✅ | ✅ Shows a "requests your input" card with Submit / Decline. Tested against a server deployed with `deploy vercel --auth supabase` |
 | Cursor | ✅ | ✅ Shows a Submit / Cancel prompt. Answer it promptly: Cursor gives up on a call that waits too long, then retries |
 | Codex (desktop app; CLI 0.153 and 0.167) | ✅ | ⛔ Declines automatically without showing a prompt, so tools that need confirmation never run ([openai/codex#60158](https://github.com/openai/codex/issues/60158)) |
 | Claude Desktop 4.x (Windows) | ✅ | ⛔ No prompt shown, so tools that need confirmation are refused and nothing changes |
