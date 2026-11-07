@@ -9,7 +9,7 @@ Locally, each person runs their own copy over stdio. Remotely, one copy runs at 
 You need, once:
 
 1. **The Vercel CLI, logged in:** `npm install -g vercel`, then `vercel login`.
-2. **A Supabase project used only for this server** (the free plan works). Its *ref* is the 20 letters in its dashboard URL, `supabase.com/dashboard/project/<ref>`. The deploy changes the project's sign-in settings, so don't share it with a website.
+2. **A Supabase project used only for this server** (the free plan works). Its *ref* is the 20 letters in its dashboard URL, `supabase.com/dashboard/project/<ref>`. The deploy changes the project's sign-in settings, so don't share it with a website. When creating it, keep **Enable Data API** on (the server writes audit rows through it); the other security options can be left as Supabase recommends.
 3. **A Supabase personal access token:** Account, Access Tokens, *Generate new token*. Set it as `SUPABASE_ACCESS_TOKEN`, or paste it when asked. It isn't saved anywhere.
 
 Then, from this folder:
