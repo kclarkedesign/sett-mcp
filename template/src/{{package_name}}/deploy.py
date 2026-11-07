@@ -451,8 +451,9 @@ def _resource_url(public: str, request: Request, sleep: Callable[[float], None],
             return resource
         sleep(3)
     raise DeployError(
-        f"The server at {public} didn't come up (HTTP {status}). Run `vercel logs {urlsplit(public).netloc}` "
-        "to see why; a missing setting is reported there."
+        f"The server at {public} didn't come up (HTTP {status}). A 404 usually means Vercel didn't run the "
+        "app as Python: check that vercel.json (\"framework\": \"python\") and asgi.py are in this folder. "
+        f"Otherwise run `vercel logs {urlsplit(public).netloc}`; a missing setting is reported there."
     )
 
 

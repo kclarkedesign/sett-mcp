@@ -242,8 +242,11 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
             deploy.set_writer(supabase, args.email, args.action == "grant")
         return
 
-    if not (cwd / "pyproject.toml").exists() or not (cwd / "asgi.py").exists():
-        raise deploy.DeployError("Run the deploy from the project folder (the one with pyproject.toml and asgi.py)")
+    if not all((cwd / name).exists() for name in ("pyproject.toml", "asgi.py", "vercel.json")):
+        raise deploy.DeployError(
+            "Run the deploy from the project folder, the one with pyproject.toml, asgi.py and vercel.json "
+            "(vercel.json tells Vercel to run the app as Python)"
+        )
     state = deploy.load_state(cwd)
     ref = args.supabase_project or state.get("supabase_project")
     if not ref:

@@ -275,6 +275,8 @@ def test_bad_token_says_so():
         Supabase("bad", REF, refuse).project()
 
 
-def test_root_entry_point_exports_the_app():
-    root = Path(__file__).resolve().parents[1] / "asgi.py"
-    assert "from {{ package_name }}.asgi import app" in root.read_text()
+def test_vercel_runs_the_root_entry_point_as_python():
+    root = Path(__file__).resolve().parents[1]
+    assert "from {{ package_name }}.asgi import app" in (root / "asgi.py").read_text()
+    # Without this, a project created by `vercel project add` is "Other" and serves only static files.
+    assert json.loads((root / "vercel.json").read_text())["framework"] == "python"
