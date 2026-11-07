@@ -130,6 +130,7 @@ def test_deploy_sets_everything_up(run, tmp_path):
 
     queries = [c[3]["query"] for c in supabase.sent("POST", "/database/query")]
     assert "create table if not exists public.sett_audit" in queries[0]
+    assert "grant insert on table public.sett_audit to service_role" in queries[0]  # newer projects need it
     assert f"resource text := '{RESOURCE}';" in queries[1]
 
     auth = supabase.sent("PATCH", "/config/auth")[0][3]

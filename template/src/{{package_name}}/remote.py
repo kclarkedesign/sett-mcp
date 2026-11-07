@@ -52,6 +52,10 @@ create table if not exists public.{AUDIT_TABLE} (
   client_id text
 );
 alter table public.{AUDIT_TABLE} enable row level security;
+-- Newer projects don't grant API roles access to tables made in SQL. The server writes
+-- with the secret key (service_role), and only inserts; nothing else can read or write.
+grant usage on schema public to service_role;
+grant insert on table public.{AUDIT_TABLE} to service_role;
 """.strip()
 
 # Every standard asymmetric JWS algorithm (RFC 7518, RFC 8037). Shared-secret (HS*) and
