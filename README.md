@@ -6,6 +6,8 @@
 **Python MCP servers that are read-only until you say otherwise.** One command gives you a working server on the official MCP Python SDK v2, with guardrails that are tested and on by default.
 
 [![Test template](https://github.com/kclarkedesign/sett-mcp/actions/workflows/test-template.yml/badge.svg)](https://github.com/kclarkedesign/sett-mcp/actions/workflows/test-template.yml)
+[![PyPI](https://img.shields.io/pypi/v/sett-mcp)](https://pypi.org/project/sett-mcp/)
+[![sett-mcp MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/kclarkedesign/sett-mcp/badges/score.svg)](https://glama.ai/mcp/servers/kclarkedesign/sett-mcp)
 
 ```bash
 uvx sett-mcp new my-server
