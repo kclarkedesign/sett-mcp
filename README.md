@@ -81,7 +81,7 @@ Tested in November 2026 with the example server this template generates:
 |---|---|---|
 | Claude Code | ✅ | ✅ Shows an Accept / Decline prompt, including in auto mode |
 | Cursor | ✅ | ✅ Shows a Submit / Cancel prompt. Answer it promptly: Cursor gives up on a call that waits too long, then retries |
-| Codex (desktop app; CLI 0.153 and 0.167) | ✅ | ⛔ Declines automatically without showing a prompt, so tools that need confirmation never run ([openai/codex#6992](https://github.com/openai/codex/issues/6992)) |
+| Codex (desktop app; CLI 0.153 and 0.167) | ✅ | ⛔ Declines automatically without showing a prompt, so tools that need confirmation never run ([openai/codex#60158](https://github.com/openai/codex/issues/60158)) |
 | Claude Desktop 4.x (Windows) | ✅ | ⛔ No prompt shown, so tools that need confirmation are refused and nothing changes |
 
 What that means in practice:
