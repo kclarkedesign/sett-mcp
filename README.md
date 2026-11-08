@@ -39,7 +39,7 @@ Connecting an AI assistant to a real system is easy. Being comfortable leaving i
 Plus the plumbing that usually takes an afternoon:
 
 - A runnable example (a small contacts store) you replace with your real API client
-- `install-claude-desktop` command that writes the config for macOS, Windows and Linux
+- `install <client>` for Claude Desktop, Cursor, Claude Code and Codex, with `--writes` to turn write tools on, and a troubleshooting guide in every project
 - Stdio by default, stateless Streamable HTTP with `serve --http`, tested against the edge cases that break real clients
 - **Remote in one command:** `deploy vercel --auth supabase` hosts the server on your own Vercel account with Supabase for sign-in: a consent page, invite-only users, a writer role for write tools, confirmations that work across server instances, and an audit table. Remote mode also works with any OAuth provider on any host
 - Setup instructions for Claude Desktop, Claude Code, Cursor, the MCP Inspector and Docker
@@ -53,8 +53,9 @@ Plus the plumbing that usually takes an afternoon:
 ```bash
 uvx sett-mcp new my-server
 cd my-server
+uv sync
 uv run --extra dev pytest                  # the guardrail test suite
-uv run my-server install-claude-desktop    # then restart Claude Desktop
+uv run my-server install claude-desktop    # or cursor, claude-code, codex, all; then restart it
 ```
 
 To host it for others, with sign-in, on your own Vercel and Supabase accounts:
@@ -64,7 +65,7 @@ uv run my-server deploy vercel --auth supabase --supabase-project <ref>
 uv run my-server users add you@example.com --writer
 ```
 
-Copier asks for a name, tool prefix and environment-variable prefix. Everything else is filled in.
+Copier asks for a name, tool prefix and environment-variable prefix. Everything else is filled in. New to this? [docs/getting-started.md](docs/getting-started.md) walks through it from installing uv, on Windows and macOS.
 
 Adding a tool looks like this:
 

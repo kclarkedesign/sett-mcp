@@ -10,7 +10,7 @@ Publishing to PyPI lets anyone run the server with `uvx {{ project_slug }}`, no 
 2. Under **Your account → Publishing**, add a pending publisher: project `{{ project_slug }}`, owner `{{ github_user }}`, repository `{{ project_slug }}`, workflow `release.yml`, environment `pypi`. No token is stored anywhere; PyPI trusts that one workflow.
 3. Push a version tag, for example `git tag v0.1.0 && git push origin v0.1.0`. The release workflow runs the tests, then publishes.
 
-The version comes from `pyproject.toml`, so bump it before each tag. Once it's published, `uv run {{ project_slug }} install-claude-desktop --use-uvx` writes a Claude Desktop config that runs the published package.
+The version comes from `pyproject.toml`, so bump it before each tag. Once it's published, `uv run {{ project_slug }} install claude-desktop --use-uvx` (or `install all --use-uvx`) writes client configs that run the published package.
 
 ## 2. Glama
 

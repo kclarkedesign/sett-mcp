@@ -18,34 +18,26 @@ Built with [Sett](https://github.com/kclarkedesign/sett-mcp) on the official MCP
 ## Quick start
 
 ```bash
-uv run --extra dev pytest                       # the guardrails, tested
-uv run {{ project_slug }} install-claude-desktop  # then fully quit and reopen Claude Desktop
+uv sync
+uv run --extra dev pytest                          # the guardrails, tested
+uv run {{ project_slug }} install claude-desktop   # then fully quit and reopen Claude Desktop
 ```
 
 Ask Claude to "search contacts for Northwind." Emails and phone numbers come back masked.
 
 ## Connect a client
 
-**Claude Desktop:** `uv run {{ project_slug }} install-claude-desktop` adds the server to every Claude Desktop config it finds (macOS, Windows, including newer Windows installs, and Linux), backing each one up first. Add `--dry-run` to see the change without writing it.
-
-**Claude Code:** from this folder,
+One command per client. Each backs up the client's config before changing it:
 
 ```bash
-claude mcp add {{ project_slug }} -- uv run --directory "$PWD" {{ project_slug }}
+uv run {{ project_slug }} install claude-desktop   # every Claude Desktop install found (macOS, Windows, Linux)
+uv run {{ project_slug }} install cursor           # ~/.cursor/mcp.json
+uv run {{ project_slug }} install claude-code      # through `claude mcp add`, for every folder
+uv run {{ project_slug }} install codex            # ~/.codex/config.toml
+uv run {{ project_slug }} install all              # every client found
 ```
 
-**Cursor:** add this to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project, with the absolute path to this folder:
-
-```json
-{
-  "mcpServers": {
-    "{{ project_slug }}": {
-      "command": "uv",
-      "args": ["run", "--directory", "/absolute/path/to/{{ project_slug }}", "{{ project_slug }}"]
-    }
-  }
-}
-```
+Add `--dry-run` to see the change without making it, or `--remove` to take the server out. Then restart the client; Claude Desktop needs a full quit from the tray or menu bar.
 
 **MCP Inspector**, to try tools by hand:
 
@@ -55,15 +47,17 @@ npx @modelcontextprotocol/inspector uv run {{ project_slug }}
 
 **Docker:** `docker build -t {{ project_slug }} .` then `docker run --rm -i {{ project_slug }}`. The container speaks MCP over stdio, the same way the clients above start it.
 
-Whichever client you use, writes stay off until you add `{{ env_prefix }}_ENABLE_WRITES=true` to the server's environment (for Claude Code, `claude mcp add ... -e {{ env_prefix }}_ENABLE_WRITES=true -- ...`). Whether a client can show confirmation prompts varies; see [Sett's client support table](https://github.com/kclarkedesign/sett-mcp#client-support).
+Whether a client can show confirmation prompts varies; see [Sett's client support table](https://github.com/kclarkedesign/sett-mcp#client-support). Something not working? [docs/troubleshooting.md](docs/troubleshooting.md) covers the usual problems.
 
 ## Turning on writes
 
-Add the variable to the server's environment. In Claude Desktop's config that's the `env` block the installer created:
+Install with `--writes`, then restart the client:
 
-```json
-"env": { "{{ env_prefix }}_ENABLE_WRITES": "true" }
+```bash
+uv run {{ project_slug }} install claude-desktop --writes
 ```
+
+That sets `{{ env_prefix }}_ENABLE_WRITES=true` in the client's entry for this server. Install again without `--writes` to turn them off. For another setup, add that variable to the server's environment yourself.
 
 The policy file can't turn writes on. That decision belongs to whoever runs the server, not to a line in the repo.
 
