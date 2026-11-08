@@ -149,7 +149,10 @@ def _update_json(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: bo
         servers[SERVER_KEY] = entry
     text = json.dumps(config, indent=2)
     if dry_run:
-        say(f"# {label}: {path}\n{text}")
+        # Only this server's entry: the rest of a client's config can hold private
+        # settings (folders, account ids) that people paste into issues with this output.
+        change = "remove" if remove else json.dumps({SERVER_KEY: entry}, indent=2)
+        say(f"# {label}: {path} (mcpServers, other entries unchanged)\n{change}")
         return
     _backup(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +199,8 @@ def _update_codex(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: b
         text = f"{text}\n\n{block}" if text else block
     text += "\n"
     if dry_run:
-        say(f"# Codex: {path}\n{text}")
+        change = f"remove [mcp_servers.{SERVER_KEY}]" if remove else block
+        say(f"# Codex: {path} (other settings unchanged)\n{change}")
         return
     _backup(path)
     path.parent.mkdir(parents=True, exist_ok=True)

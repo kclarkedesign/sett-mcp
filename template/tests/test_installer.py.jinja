@@ -128,3 +128,18 @@ def test_broken_json_is_left_alone(tmp_path, monkeypatch):
     installer.install("cursor", say=said.append)
     assert (tmp_path / ".cursor/mcp.json").read_text() == "{not json"
     assert "isn't valid JSON" in said[0]
+
+
+def test_dry_run_shows_only_this_servers_entry(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor/mcp.json").write_text('{"mcpServers": {"other": {"command": "secret-path"}}, "account": "id-123"}')
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex/config.toml").write_text('token_note = "private"\n')
+    said = []
+    installer.install("cursor", dry_run=True, say=said.append)
+    installer.install("codex", dry_run=True, say=said.append)
+    shown = "\n".join(said)
+    assert installer.SERVER_KEY in shown
+    assert "secret-path" not in shown and "id-123" not in shown and "private" not in shown
+    assert (tmp_path / ".cursor/mcp.json").read_text().count("other") == 1  # nothing written
