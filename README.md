@@ -96,7 +96,7 @@ Tested in November 2026 with the example server this template generates:
 What that means in practice:
 
 - **A confirmation is only as strong as the client.** Sett can't tell a person clicking Accept from a client that accepts automatically. The write gate and the allow / deny lists don't depend on the client at all, so treat those as the hard limits.
-- **Where prompts can't reach** (local servers in Claude Desktop today), keep the default `confirm: destructive`, or deploy the server remotely so the prompt can be shown. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
+- **Where prompts can't reach** (local servers in Claude Desktop today), keep the default `confirm: destructive`, or deploy the server remotely so the prompt can be shown: `deploy vercel --auth supabase --writes`, give the person the writer role with `users add <email> --writer`, and add the `/mcp` address as a connector. Without `--writes`, write tools aren't registered at all. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
 - **Claude may refuse on its own.** In our tests Claude sometimes declined to call a tool described as permanently deleting data, or asked in chat first. That's a welcome extra layer, but it depends on the model and the conversation, which is why the server enforces confirmation itself.
 
 Tried another client? Open an issue with what you saw and we'll add it to the table.
