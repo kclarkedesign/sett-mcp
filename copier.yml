@@ -37,6 +37,7 @@ env_prefix:
   type: str
   help: Prefix for environment variables
   default: "{{ package_name | upper }}"
+  validator: "{% if not (env_prefix | regex_search('^[A-Z][A-Z0-9_]*$')) %}Use capital letters, digits and underscores{% endif %}"
 
 description:
   type: str

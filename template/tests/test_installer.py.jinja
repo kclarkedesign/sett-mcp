@@ -73,7 +73,7 @@ def test_codex_keeps_other_settings_and_replaces_its_own_table(tmp_path, monkeyp
     text = config.read_text()
     assert 'model = "gpt-5"' in text and "[mcp_servers.other]" in text
     assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1
-    assert '"old"' not in text and f'{installer.WRITES_VAR} = "true"' in text
+    assert '"old"' not in text and f'"{installer.WRITES_VAR}" = "true"' in text
     tomllib = pytest.importorskip("tomllib") if installer.sys.version_info >= (3, 11) else pytest.importorskip("tomli")
     parsed = tomllib.loads(text)["mcp_servers"][installer.SERVER_KEY]
     assert parsed["env"] == {installer.WRITES_VAR: "true"} and parsed["args"] == ["-m", "{{ package_name }}"]
@@ -224,3 +224,26 @@ def test_claude_code_remove_reports_real_failures(tmp_path, monkeypatch, code, s
     said = []
     assert installer.install("claude-code", remove=True, say=said.append, run=lambda argv, **kw: Done()) is ok
     assert ("failed" in said[0]) is not ok
+
+
+@pytest.mark.parametrize("quote", ['"' * 3, "'" * 3])
+def test_codex_leaves_header_lookalikes_inside_multiline_strings_alone(tmp_path, monkeypatch, quote):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    note = f"[mcp_servers.{installer.SERVER_KEY}]\nthis is just text\n[other]"
+    original = f"notes = {quote}\n{note}\n{quote}\n\n[mcp_servers.other]\ncommand = \"keep\"\n"
+    config.write_text(original)
+    assert installer.install("codex", say=lambda _: None)
+    text = config.read_text()
+    assert text.startswith(original.rstrip())  # the string and the other table, untouched
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 2  # the text one + the real one
+    tomllib = pytest.importorskip("tomllib") if installer.sys.version_info >= (3, 11) else pytest.importorskip("tomli")
+    parsed = tomllib.loads(text)
+    assert parsed["notes"].strip() == note and installer.SERVER_KEY in parsed["mcp_servers"]
+
+
+def test_codex_env_keys_are_quoted(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    installer.install("codex", writes=True, say=lambda _: None)
+    assert f'"{installer.WRITES_VAR}" = "true"' in (tmp_path / ".codex/config.toml").read_text()

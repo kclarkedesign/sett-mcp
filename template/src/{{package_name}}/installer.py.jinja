@@ -205,13 +205,16 @@ def _update_codex(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: b
     kept: list[str] = []
     skipping = False
     table: tuple[str, ...] = ()
+    in_string = ""  # the delimiter of a multiline string the scan is inside, if any
     for line in original.splitlines():
-        key = _table_key(line)
+        # Inside a multiline string a line is text, even if it looks like a header.
+        key = None if in_string else _table_key(line)
+        in_string = _multiline_state(line, in_string)
         if key is not None:
             table = key
             # This server's table and its subtables ([mcp_servers.<name>.env]), however spelled.
             skipping = key[:2] == ("mcp_servers", SERVER_KEY)
-        elif not skipping and _defines_ours(line, table):
+        elif not skipping and not in_string and _defines_ours(line, table):
             say(
                 f"Codex: {path} already defines {SERVER_KEY} in a form this installer doesn't edit "
                 f"(line: {line.strip()!r}). Remove it, then run this again."
@@ -223,7 +226,7 @@ def _update_codex(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: b
     block = ""
     if not remove:
         q = json.dumps  # a JSON string is also a valid TOML basic string
-        env = ", ".join(f"{key} = {q(value)}" for key, value in entry["env"].items())
+        env = ", ".join(f"{q(key)} = {q(value)}" for key, value in entry["env"].items())  # quoted keys: always one key
         args = ", ".join(q(a) for a in entry["args"])
         inline = "{ " + env + " }"  # an inline TOML table (spelled out: braces are template syntax here)
         block = f"[mcp_servers.{SERVER_KEY}]\ncommand = {q(entry['command'])}\nargs = [{args}]\nenv = {inline}"
@@ -242,6 +245,26 @@ def _update_codex(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: b
     path.write_text(text, encoding="utf-8")
     say(f"Codex: {'removed from' if remove else 'added to'} {path}")
     return True
+
+
+def _multiline_state(line: str, in_string: str) -> str:
+    """Whether a multiline string (\"\"\" or \'\'\') is still open after this line."""
+    rest = line
+    while True:
+        if in_string:
+            end = rest.find(in_string)
+            if end < 0:
+                return in_string
+            rest, in_string = rest[end + 3 :], ""
+            continue
+        # Skip a comment, then find the next opening delimiter on the line.
+        starts = [(rest.find(d), d) for d in ('"' * 3, "'" * 3) if d in rest]
+        hash_at = rest.find("#")
+        starts = [(i, d) for i, d in starts if hash_at < 0 or i < hash_at]
+        if not starts:
+            return ""
+        at, delim = min(starts)
+        rest, in_string = rest[at + 3 :], delim
 
 
 def _table_key(line: str) -> tuple[str, ...] | None:
