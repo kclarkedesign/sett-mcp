@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from {{ package_name }} import installer
 
 
@@ -143,3 +145,61 @@ def test_dry_run_shows_only_this_servers_entry(tmp_path, monkeypatch):
     assert installer.SERVER_KEY in shown
     assert "secret-path" not in shown and "id-123" not in shown and "private" not in shown
     assert (tmp_path / ".cursor/mcp.json").read_text().count("other") == 1  # nothing written
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        f"[mcp_servers.{installer.SERVER_KEY}] # added by hand",
+        f'[ mcp_servers . "{installer.SERVER_KEY}" ]',
+        f"[mcp_servers.'{installer.SERVER_KEY}']",
+    ],
+)
+def test_codex_recognises_its_table_however_it_is_spelled(tmp_path, monkeypatch, header):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    config.write_text(f'{header}\ncommand = "old"\n\n[mcp_servers.other]\ncommand = "keep"\n')
+    assert installer.install("codex", say=lambda _: None)
+    text = config.read_text()
+    assert '"old"' not in text and '"keep"' in text
+    assert text.count(installer.SERVER_KEY) == 1
+
+
+def test_codex_leaves_other_spellings_alone_and_says_so(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = f'[mcp_servers]\n"{installer.SERVER_KEY}" = ' + '{ command = "old" }\n'
+    config.write_text(original)
+    said = []
+    assert not installer.install("codex", say=said.append)
+    assert config.read_text() == original
+    assert "doesn't edit" in said[0]
+
+
+def test_codex_never_writes_invalid_toml(tmp_path, monkeypatch):
+    pytest.importorskip("tomllib")
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = "this is = = not toml\n"
+    config.write_text(original)
+    said = []
+    assert not installer.install("codex", say=said.append)
+    assert config.read_text() == original and "Nothing was written" in said[0]
+
+
+def test_a_failed_claude_code_add_is_reported_and_fails(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/bin/claude" if name == "claude" else None)
+
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "error: unknown option '-s'"
+
+    said = []
+    assert not installer.install("claude-code", say=said.append, run=lambda argv, **kw: Failed())
+    assert "failed" in said[0] and "unknown option" in said[0]
+    assert len(said) == 1  # no "restart the client" line after a failure

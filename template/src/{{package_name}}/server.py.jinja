@@ -215,7 +215,8 @@ def main(argv: list[str] | None = None) -> None:
         from .installer import install
 
         client = args.client if args.command == "install" else "claude-desktop"
-        install(client, writes=args.writes, use_uvx=args.use_uvx, dry_run=args.dry_run, remove=args.remove)
+        if not install(client, writes=args.writes, use_uvx=args.use_uvx, dry_run=args.dry_run, remove=args.remove):
+            raise SystemExit(1)
         return
 
     if args.command in ("deploy", "users"):
