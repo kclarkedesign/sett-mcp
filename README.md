@@ -91,12 +91,12 @@ Tested in November 2026 with the example server this template generates:
 | Claude on the web (claude.ai, remote connector) | ✅ | ✅ Shows a "requests your input" card with Submit / Decline. Tested against a server deployed with `deploy vercel --auth supabase` |
 | Cursor | ✅ | ✅ Shows a Submit / Cancel prompt. Answer it promptly: Cursor gives up on a call that waits too long, then retries |
 | Codex CLI 0.167 | ✅ | ✅ Shows an Allow / Deny / Cancel prompt, after Codex's own approval for the tool call. Sett 0.2 and earlier sent a form schema Codex rejects, so it cancelled without asking ([openai/codex#60158](https://github.com/openai/codex/issues/60158)) |
-| Claude Desktop 4.x (Windows) | ✅ | ⛔ No prompt shown, so tools that need confirmation are refused and nothing changes |
+| Claude Desktop 4.x (Windows) | ✅ | ✅ for remote servers (a connector such as one made with `deploy vercel`): shows the same Submit / Decline card as the web. ⛔ for local servers: the app reaches them through a bridge that doesn't carry prompts, so tools that need confirmation are refused and nothing changes |
 
 What that means in practice:
 
 - **A confirmation is only as strong as the client.** Sett can't tell a person clicking Accept from a client that accepts automatically. The write gate and the allow / deny lists don't depend on the client at all, so treat those as the hard limits.
-- **In clients without prompts** (Claude Desktop today), keep the default `confirm: destructive`. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
+- **Where prompts can't reach** (local servers in Claude Desktop today), keep the default `confirm: destructive`, or deploy the server remotely so the prompt can be shown. Ordinary writes still work, and destructive ones are refused. Setting `confirm: off` makes them run without asking.
 - **Claude may refuse on its own.** In our tests Claude sometimes declined to call a tool described as permanently deleting data, or asked in chat first. That's a welcome extra layer, but it depends on the model and the conversation, which is why the server enforces confirmation itself.
 
 Tried another client? Open an issue with what you saw and we'll add it to the table.
