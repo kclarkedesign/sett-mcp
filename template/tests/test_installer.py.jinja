@@ -163,7 +163,7 @@ def test_codex_recognises_its_table_however_it_is_spelled(tmp_path, monkeypatch,
     assert installer.install("codex", say=lambda _: None)
     text = config.read_text()
     assert '"old"' not in text and '"keep"' in text
-    assert text.count(installer.SERVER_KEY) == 1
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1  # one table, not a duplicate
 
 
 def test_codex_leaves_other_spellings_alone_and_says_so(tmp_path, monkeypatch):
