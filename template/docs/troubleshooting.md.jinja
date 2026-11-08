@@ -44,6 +44,10 @@ uv run {{ project_slug }}                                    # run the server by
 | The deploy waits on a step with no output | The Vercel CLI asked a question (older CLIs) | Answer it in the terminal; the deploy carries on |
 | "The server ... didn't come up (HTTP 404)" | Vercel didn't run the app as Python | Check `vercel.json` (`"framework": "python"`) and `asgi.py` are in this folder |
 | "didn't come up" with another error | A setting is missing or wrong | `vercel logs --deployment <your-project>.vercel.app` names it |
+| "Which Supabase organization?" | You belong to more than one | Add `--supabase-org <slug>` with one from the list it prints |
+| Creating the project is refused, mentioning the free plan | The free plan allows two active projects across the organizations you own or administer | Pause or delete one in the Supabase dashboard, or use `--supabase-project <ref>` with an existing project |
+| "isn't ready after 15 minutes" | The new project is still starting | Run the same deploy again later: the project was saved, so it carries on instead of creating another |
+| It asks for a Supabase access token although you ran `supabase login` | The deploy couldn't read the CLI's saved sign-in (a different profile, or a keyring it can't open) | Set `SUPABASE_ACCESS_TOKEN`, or paste a token from Account, Access Tokens |
 | "still signs tokens with a shared secret" | The Supabase project uses the legacy JWT secret | Supabase dashboard, Authentication, JWT Keys, "Rotate keys"; then deploy again |
 | "This Supabase project's Site URL is ..." | The project already serves another site | Use a Supabase project just for this server, or `--yes` if that address was this server's |
 | No rows in the `sett_audit` table, "403" in Vercel's logs | Supabase's Data API is off, or the table predates Sett 0.3.0 | Turn on the Data API (Project Settings, Data API), and run `grant insert on table public.sett_audit to service_role;` in the SQL editor |

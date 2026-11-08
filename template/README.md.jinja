@@ -116,7 +116,7 @@ Without sign-in configured, keep HTTP mode on localhost.
 Host it at a public URL on your own Vercel account, with Supabase handling sign-in:
 
 ```bash
-uv run {{ project_slug }} deploy vercel --auth supabase --supabase-project <ref>
+uv run {{ project_slug }} deploy vercel --auth supabase --create-supabase-project
 uv run {{ project_slug }} users add you@example.com --writer
 ```
 

@@ -9,19 +9,24 @@ Locally, each person runs their own copy over stdio. Remotely, one copy runs at 
 You need, once:
 
 1. **The Vercel CLI, logged in:** `npm install -g vercel`, then `vercel login`.
-2. **A Supabase project used only for this server** (the free plan works). Its *ref* is the 20 letters in its dashboard URL, `supabase.com/dashboard/project/<ref>`. The deploy changes the project's sign-in settings, so don't share it with a website. When creating it, keep **Enable Data API** on (the server writes audit rows through it); the other security options can be left as Supabase recommends.
-3. **A Supabase personal access token:** Account, Access Tokens, *Generate new token*. Set it as `SUPABASE_ACCESS_TOKEN`, or paste it when asked. It isn't saved anywhere.
+2. **A Supabase account** (the free plan works), signed in on this machine: install the [Supabase CLI](https://supabase.com/docs/guides/cli) and run `supabase login`, which opens a browser. The deploy reuses that sign-in. Without the CLI, create a personal access token (Account, Access Tokens) and set it as `SUPABASE_ACCESS_TOKEN`, or paste it when asked; it isn't saved anywhere. A token limited to one organization needs **Organization projects: read-write** to create projects.
 
 Then, from this folder:
 
 ```bash
-uv run {{ project_slug }} deploy vercel --auth supabase --supabase-project <ref>
+uv run {{ project_slug }} deploy vercel --auth supabase --create-supabase-project
 ```
+
+That creates a Supabase project just for this server, named after it, and waits a few minutes for it to start. It prints the new project's database password once; the server doesn't need it, so keep it only if you'll connect to Postgres directly. If you belong to several Supabase organizations, add `--supabase-org <slug>`; for a region other than the Americas, `--region emea`, `--region apac`, or a code such as `--region eu-central-1`.
+
+Already have a project for it? Use `--supabase-project <ref>` instead: the ref is the 20 letters in its dashboard URL. Use one that serves nothing else, since the deploy changes its sign-in settings, and keep its **Data API** on (the server writes audit rows through it).
 
 It prints each step and ends with the address to connect clients to, `https://<your-project>.vercel.app/mcp`. Run it again any time: it checks what's already there, keeps the shared confirmation key, and saves the project names (no secrets) in `sett-deploy.json` so later runs need no flags.
 
 | Option | What it does |
 |---|---|
+| `--create-supabase-project` | Creates a Supabase project for this server on the first deploy (with `--supabase-org`, `--region`) |
+| `--supabase-project <ref>` | Uses a project you made instead |
 | `--writes` | Lets users with the writer role write (sets `{{ env_prefix }}_ENABLE_WRITES=true`). Every deploy without it turns writes off |
 | `--github-client-id <id>` | Turns on GitHub sign-in; the secret comes from `GITHUB_CLIENT_SECRET` or a prompt |
 | `--vercel-project <name>` | The Vercel project to create or reuse (default `{{ project_slug }}`) |

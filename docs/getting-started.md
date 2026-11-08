@@ -77,11 +77,11 @@ Replace the sample contacts with your real API in `src/<your_package>/tools.py`.
 When others should use it, deploy it with sign-in on your own Vercel and Supabase accounts:
 
 ```bash
-uv run my-server deploy vercel --auth supabase --supabase-project <ref> --writes
+uv run my-server deploy vercel --auth supabase --create-supabase-project --writes
 uv run my-server users add you@example.com --writer
 ```
 
-Your project's `docs/remote.md` covers what to set up first (about 10 minutes, once).
+Before the first deploy, install and sign in to two command-line tools, once: `npm install -g vercel` then `vercel login`, and the [Supabase CLI](https://supabase.com/docs/guides/cli) then `supabase login`. Both open a browser. The deploy creates the Supabase project itself. Your project's `docs/remote.md` has the details.
 
 ## Updating a project later
 

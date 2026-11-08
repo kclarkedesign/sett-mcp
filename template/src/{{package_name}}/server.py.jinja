@@ -191,6 +191,9 @@ def main(argv: list[str] | None = None) -> None:
     vercel = targets.add_parser("vercel", help="Deploy to your Vercel account, with Supabase for sign-in")
     vercel.add_argument("--auth", choices=["supabase"], default="supabase", help="Who handles sign-in")
     vercel.add_argument("--supabase-project", help="Project ref or URL (saved after the first deploy)")
+    vercel.add_argument("--create-supabase-project", action="store_true", help="Create a Supabase project for this server")
+    vercel.add_argument("--supabase-org", help="Organization for the new project, if you have more than one")
+    vercel.add_argument("--region", default="americas", help="Region for the new project: americas, emea, apac or a code such as eu-central-1")
     vercel.add_argument("--vercel-project", help="Vercel project name (default: {{ project_slug }})")
     vercel.add_argument("--scope", help="Vercel team slug (default: the CLI's current team; `vercel teams ls` lists them)")
     vercel.add_argument("--writes", action="store_true", help="Let users with the writer role write")
@@ -269,17 +272,28 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
         )
     state = deploy.load_state(cwd)
     ref = args.supabase_project or state.get("supabase_project")
+    vercel_project = args.vercel_project or state.get("vercel_project") or "{{ project_slug }}"
+    token = deploy.access_token(os.environ)
+    if args.create_supabase_project:
+        if ref:
+            raise deploy.DeployError(
+                f"This server already has Supabase project {ref}. Drop --create-supabase-project to deploy to it."
+            )
+        account = deploy.SupabaseAccount(token)
+        ref = deploy.create_supabase_project(account, vercel_project, organization=args.supabase_org, region=args.region)
+        # Saved at once, so a later step failing doesn't lead to a second project on the next run.
+        deploy.save_state(cwd, {**state, "supabase_project": ref, "vercel_project": vercel_project})
     if not ref:
         raise deploy.DeployError(
-            "Which Supabase project? Create one just for this server, then pass --supabase-project <ref> "
-            "(the ref is in its dashboard URL: supabase.com/dashboard/project/<ref>)"
+            "Which Supabase project? Add --create-supabase-project to make one for this server, or pass "
+            "--supabase-project <ref> for one you made (the ref is in its dashboard URL)"
         )
     github_secret = None
     if args.github_client_id:
         github_secret = os.environ.get("GITHUB_CLIENT_SECRET", "").strip() or getpass.getpass("GitHub client secret: ").strip()
     scope = args.scope or state.get("vercel_scope")
     options = deploy.DeployOptions(
-        vercel_project=args.vercel_project or state.get("vercel_project") or "{{ project_slug }}",
+        vercel_project=vercel_project,
         env_prefix=ENV_PREFIX,
         cwd=cwd,
         enable_writes=args.writes,
@@ -289,7 +303,7 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
         command="uv run {{ project_slug }}",
         team_chosen=bool(args.scope),
     )
-    supabase = deploy.Supabase(deploy.access_token(os.environ), deploy.project_ref(ref))
+    supabase = deploy.Supabase(token, deploy.project_ref(ref))
     deploy.deploy(options, supabase, deploy.Vercel(cwd, scope))
 
 

@@ -18,13 +18,16 @@ https://supabase.com/docs/reference/api; its OAuth server and SQL endpoint are i
 
 from __future__ import annotations
 
+import base64
 import getpass
 import json
 import os
 import re
 import secrets
 import shutil
+import string
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -88,21 +91,136 @@ def project_ref(value: str) -> str:
     return match.group(1)
 
 
-def access_token(env: Mapping[str, str]) -> str:
+TOKEN_PATTERN = re.compile(r"^sbp_(oauth_|v0_)?[a-f0-9]{40}$")
+KEYRING_SERVICE = "Supabase CLI"
+
+
+def access_token(
+    env: Mapping[str, str],
+    *,
+    ask: Callable[[str], str] = getpass.getpass,
+    cli_login: Callable[[Mapping[str, str]], str | None] | None = None,
+    say: Callable[[str], None] = lambda message: print(message, file=sys.stderr),
+) -> str:
+    """A Supabase personal access token: SUPABASE_ACCESS_TOKEN, else `supabase login`'s, else ask."""
     token = env.get("SUPABASE_ACCESS_TOKEN", "").strip()
+    if token:
+        return token
+    token = (cli_login or supabase_cli_token)(env) or ""
+    if token:
+        say("Using your Supabase CLI login (supabase login).")
+        return token
+    token = ask("Supabase personal access token (supabase.com/dashboard/account/tokens): ").strip()
     if not token:
-        token = getpass.getpass("Supabase personal access token (supabase.com/dashboard/account/tokens): ").strip()
-    if not token:
-        raise DeployError("A Supabase personal access token is needed (or set SUPABASE_ACCESS_TOKEN)")
+        raise DeployError("A Supabase access token is needed: run `supabase login`, set SUPABASE_ACCESS_TOKEN, or paste one")
     return token
 
 
-class Supabase:
-    """The few Supabase Management API and Auth admin calls the deploy needs."""
+def supabase_cli_token(env: Mapping[str, str], run: Callable[..., Any] = subprocess.run) -> str | None:
+    """The token `supabase login` saved, read where the Supabase CLI keeps it; None if there isn't one.
 
-    def __init__(self, token: str, ref: str, request: Request = http_request) -> None:
-        self.ref = ref
-        self.url = f"https://{ref}.supabase.co"
+    Same order as the CLI: the OS keyring (account = the profile, then the legacy
+    "access-token"), then the file it falls back to. Nothing is written or printed.
+    """
+    home = Path(env.get("SUPABASE_HOME") or Path.home() / ".supabase")
+    profile = env.get("SUPABASE_PROFILE", "").strip()
+    if not profile:
+        try:
+            profile = (home / "profile").read_text(encoding="utf-8").strip()
+        except OSError:
+            profile = ""
+    candidates: list[str | None] = []
+    if not _is_wsl() and env.get("SUPABASE_NO_KEYRING") != "1":
+        for account in (profile or "supabase", "access-token"):
+            candidates.append(_keyring_secret(account, run))
+    try:
+        candidates.append((home / "access-token").read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    for candidate in candidates:
+        token = _decode_keyring(candidate or "").strip()
+        if TOKEN_PATTERN.match(token):
+            return token
+    return None
+
+
+def _is_wsl() -> bool:
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+    return "microsoft" in release or "wsl" in release
+
+
+def _decode_keyring(value: str) -> str:
+    """Undo the encodings the Go CLI's keyring library used on macOS."""
+    value = value.strip()
+    try:
+        if value.startswith("go-keyring-base64:"):
+            return base64.b64decode(value.removeprefix("go-keyring-base64:")).decode()
+        if value.startswith("go-keyring-encoded:"):
+            return bytes.fromhex(value.removeprefix("go-keyring-encoded:")).decode()
+    except ValueError:
+        return ""
+    return value
+
+
+def _keyring_secret(account: str, run: Callable[..., Any]) -> str | None:
+    if sys.platform == "win32":
+        return _windows_credential(f"{KEYRING_SERVICE}:{account}")
+    if sys.platform == "darwin":
+        argv = ["security", "find-generic-password", "-s", KEYRING_SERVICE, "-a", account, "-w"]
+    elif shutil.which("secret-tool"):
+        argv = ["secret-tool", "lookup", "service", KEYRING_SERVICE, "username", account]
+    else:
+        return None
+    try:
+        done = run(argv, capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if getattr(done, "returncode", 1) == 0 else None
+
+
+def _windows_credential(target: str) -> str | None:
+    """Read a generic credential from Windows Credential Manager (where the CLI's keyring writes)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Credential(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    try:
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+    pointer = ctypes.POINTER(Credential)()
+    if not advapi.CredReadW(target, 1, 0, ctypes.byref(pointer)):  # 1 = CRED_TYPE_GENERIC
+        return None
+    try:
+        blob = ctypes.string_at(pointer.contents.CredentialBlob, pointer.contents.CredentialBlobSize)
+    finally:
+        advapi.CredFree(pointer)
+    # The CLI stores UTF-8 bytes; tolerate UTF-16 from other writers.
+    return blob.decode("utf-16-le") if b"\x00" in blob else blob.decode("utf-8", errors="replace")
+
+
+class SupabaseAccount:
+    """Management API calls that aren't about one project: organizations, new projects, health."""
+
+    def __init__(self, token: str, request: Request = http_request) -> None:
         self._token = token
         self._request = request
 
@@ -117,6 +235,38 @@ class Supabase:
             raise DeployError(f"Supabase answered {status} to {method} {urlsplit(url).path}: {detail}")
         return json.loads(raw) if raw.strip() else None
 
+    def organizations(self) -> list[dict[str, Any]]:
+        return self._call("GET", f"{API}/v1/organizations") or []
+
+    def create_project(self, name: str, organization: str, db_pass: str, region: str) -> dict[str, Any]:
+        smart = region in SMART_REGIONS
+        body = {
+            "name": name,
+            "organization_slug": organization,
+            "db_pass": db_pass,
+            "region_selection": {"type": "smartGroup" if smart else "specific", "code": region},
+        }
+        return self._call("POST", f"{API}/v1/projects", body)
+
+    def project_status(self, ref: str) -> str:
+        return str((self._call("GET", f"{API}/v1/projects/{ref}") or {}).get("status", ""))
+
+    def health(self, ref: str) -> list[dict[str, Any]]:
+        return self._call("GET", f"{API}/v1/projects/{ref}/health?services=auth,db,rest") or []
+
+    def for_project(self, ref: str) -> Supabase:
+        """A client for one project, with the same token."""
+        return Supabase(self._token, ref, self._request)
+
+
+class Supabase(SupabaseAccount):
+    """The few Supabase Management API and Auth admin calls the deploy needs, for one project."""
+
+    def __init__(self, token: str, ref: str, request: Request = http_request) -> None:
+        super().__init__(token, request)
+        self.ref = ref
+        self.url = f"https://{ref}.supabase.co"
+
     def _api(self, method: str, path: str, body: Any = None) -> Any:
         return self._call(method, f"{API}/v1/projects/{self.ref}{path}", body)
 
@@ -127,7 +277,11 @@ class Supabase:
         return self._api("GET", "/api-keys?reveal=true")
 
     def create_secret_key(self) -> dict[str, Any]:
-        return self._api("POST", "/api-keys?reveal=true", {"type": "secret", "name": "sett_server"})
+        body = {"type": "secret", "name": "sett_server", "secret_jwt_template": {"role": "service_role"}}
+        return self._api("POST", "/api-keys?reveal=true", body)
+
+    def create_publishable_key(self) -> dict[str, Any]:
+        return self._api("POST", "/api-keys?reveal=true", {"type": "publishable", "name": "default"})
 
     def sql(self, query: str) -> list[dict[str, Any]]:
         """Run fixed SQL (the deploy's own statements; never user input)."""
@@ -359,7 +513,80 @@ def publishable_key(keys: list[dict[str, Any]]) -> str:
     for key in keys:
         if key.get("name") == "anon" and key.get("api_key"):
             return key["api_key"]
-    raise DeployError("The project has no publishable key. Create one in the dashboard (Settings, API Keys).")
+    return ""
+
+
+SMART_REGIONS = ("americas", "emea", "apac")
+
+
+def create_supabase_project(
+    account: SupabaseAccount,
+    name: str,
+    *,
+    organization: str | None = None,
+    region: str = "americas",
+    say: Callable[[str], None] = print,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    """Create a Supabase project for this server and wait until it's ready. Returns its ref."""
+    orgs = account.organizations()
+    if organization:
+        chosen = [o for o in orgs if organization in (o.get("slug"), o.get("name"))]
+    else:
+        chosen = orgs if len(orgs) == 1 else []
+    if not chosen:
+        listed = ", ".join(f"{o.get('slug')} ({o.get('name')})" for o in orgs) or "none found"
+        if not orgs:
+            raise DeployError("Your Supabase account has no organization yet. Create one at supabase.com/dashboard, then run this again.")
+        raise DeployError(f"Which Supabase organization? Pass --supabase-org with one of: {listed}")
+    slug = str(chosen[0].get("slug"))
+    # The database password is only needed to connect to Postgres directly; the server never uses it.
+    db_pass = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24))
+    say(f"    creating Supabase project {name} in {chosen[0].get('name') or slug} ({region})")
+    try:
+        ref = str(account.create_project(name, slug, db_pass, region).get("ref") or "")
+    except DeployError as exc:
+        raise DeployError(
+            f"{exc}\nThe free plan allows two active projects across the organizations you own or admin. "
+            "Pause or delete one, or pass --supabase-project with an existing project."
+        ) from exc
+    if not ref:
+        raise DeployError("Supabase created the project but didn't return its ref; find it in the dashboard and pass --supabase-project")
+    say(f"    project {ref}. Database password (shown once, not saved; only for connecting to Postgres directly): {db_pass}")
+    wait_until_ready(account.for_project(ref), say=say, sleep=sleep, clock=clock)
+    return ref
+
+
+def wait_until_ready(
+    supabase: Supabase,
+    *,
+    say: Callable[[str], None] = print,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    limit: float = 15 * 60,
+) -> None:
+    """Wait for a new project's auth, database and API to be healthy, and its signing keys to appear."""
+    deadline, delay, healthy_at = clock() + limit, 3.0, None
+    say("    waiting for the project to start (usually a few minutes)")
+    while True:
+        try:
+            if supabase.project_status(supabase.ref) in ("INIT_FAILED", "REMOVED", "GOING_DOWN"):
+                raise DeployError(f"Supabase couldn't start project {supabase.ref}; check it in the dashboard")
+            services = supabase.health(supabase.ref)
+            if services and all(s.get("status") == "ACTIVE_HEALTHY" for s in services):
+                healthy_at = healthy_at if healthy_at is not None else clock()
+                # Signing keys appear shortly after; if they never do, the deploy's own
+                # check explains what to change, so don't wait the full limit for them.
+                if supabase.signing_keys() or clock() - healthy_at > 120:
+                    return
+        except DeployError as exc:
+            if "couldn't start" in str(exc):
+                raise
+        if clock() >= deadline:
+            raise DeployError(f"Project {supabase.ref} isn't ready after 15 minutes. Run the deploy again later; it picks up where it stopped.")
+        sleep(delay)
+        delay = min(delay * 1.5, 30.0)
 
 
 def load_state(cwd: Path) -> dict[str, Any]:
@@ -416,6 +643,10 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     say("2/7 Reading the project's keys")
     keys = supabase.api_keys()
     publishable = publishable_key(keys)
+    if not publishable:  # a new project may not have one yet
+        publishable = supabase.create_publishable_key().get("api_key") or ""
+        if not publishable:
+            raise DeployError("The project has no publishable key. Create one in the dashboard (Settings, API Keys).")
     secret = secret_key(supabase, keys)
 
     say(f"3/7 Linking Vercel project {options.vercel_project}")
