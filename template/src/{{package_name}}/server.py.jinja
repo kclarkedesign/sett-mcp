@@ -177,9 +177,14 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
 
-    install = commands.add_parser("install-claude-desktop", help="Add this server to Claude Desktop's config")
-    install.add_argument("--use-uvx", action="store_true", help="Launch with `uvx {{ project_slug }}` (after publishing to PyPI)")
-    install.add_argument("--dry-run", action="store_true", help="Print the config instead of writing it")
+    install = commands.add_parser("install", help="Add this server to an MCP client (Claude Desktop, Cursor, Claude Code, Codex)")
+    install.add_argument("client", choices=["claude-desktop", "cursor", "claude-code", "codex", "all"], help="Which client; `all` = every one found")
+    legacy = commands.add_parser("install-claude-desktop", help="Same as `install claude-desktop`")
+    for command in (install, legacy):
+        command.add_argument("--writes", action="store_true", help="Turn write tools on for this client ({{ env_prefix }}_ENABLE_WRITES=true)")
+        command.add_argument("--use-uvx", action="store_true", help="Launch with `uvx {{ project_slug }}` (after publishing to PyPI)")
+        command.add_argument("--remove", action="store_true", help="Take this server out of the client's config")
+        command.add_argument("--dry-run", action="store_true", help="Print the change instead of making it")
 
     deploy = commands.add_parser("deploy", help="Host this server at a public URL, with sign-in (docs/remote.md)")
     targets = deploy.add_subparsers(dest="target", required=True)
@@ -206,10 +211,11 @@ def main(argv: list[str] | None = None) -> None:
     # stdout carries the MCP protocol over stdio, so all logging goes to stderr.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
 
-    if args.command == "install-claude-desktop":
-        from .installer import install_claude_desktop
+    if args.command in ("install", "install-claude-desktop"):
+        from .installer import install
 
-        install_claude_desktop(use_uvx=args.use_uvx, dry_run=args.dry_run)
+        client = args.client if args.command == "install" else "claude-desktop"
+        install(client, writes=args.writes, use_uvx=args.use_uvx, dry_run=args.dry_run, remove=args.remove)
         return
 
     if args.command in ("deploy", "users"):

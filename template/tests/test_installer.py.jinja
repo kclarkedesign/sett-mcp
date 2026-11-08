@@ -29,3 +29,102 @@ def test_windows_falls_back_to_appdata(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     assert installer.config_paths() == [tmp_path / "Roaming/Claude/claude_desktop_config.json"]
+
+
+def _home(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.setattr(installer.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+
+def test_writes_are_off_unless_asked(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    installer.install("cursor", say=lambda _: None)
+    entry = json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"][installer.SERVER_KEY]
+    assert entry["env"] == {installer.WRITES_VAR: "false"}
+
+    installer.install("cursor", writes=True, say=lambda _: None)
+    entry = json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"][installer.SERVER_KEY]
+    assert entry["env"] == {installer.WRITES_VAR: "true"}
+    assert (tmp_path / ".cursor/mcp.json.bak").exists()
+
+
+def test_remove_takes_only_this_server_out(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor/mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}')
+    installer.install("cursor", say=lambda _: None)
+    installer.install("cursor", remove=True, say=lambda _: None)
+    assert json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"] == {"other": {"command": "x"}}
+
+
+def test_codex_keeps_other_settings_and_replaces_its_own_table(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        'model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\n\n'
+        f'[mcp_servers.{installer.SERVER_KEY}]\ncommand = "old"\n\n[mcp_servers.{installer.SERVER_KEY}.env]\nX = "1"\n'
+    )
+    installer.install("codex", writes=True, say=lambda _: None)
+    text = config.read_text()
+    assert 'model = "gpt-5"' in text and "[mcp_servers.other]" in text
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1
+    assert '"old"' not in text and f'{installer.WRITES_VAR} = "true"' in text
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        return
+    parsed = tomllib.loads(text)["mcp_servers"][installer.SERVER_KEY]
+    assert parsed["env"] == {installer.WRITES_VAR: "true"} and parsed["args"] == ["-m", "{{ package_name }}"]
+
+    installer.install("codex", remove=True, say=lambda _: None)
+    assert installer.SERVER_KEY not in config.read_text() and "[mcp_servers.other]" in config.read_text()
+
+
+def test_claude_code_uses_its_cli_at_user_scope(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/bin/claude" if name == "claude" else None)
+    calls = []
+
+    class Done:
+        stdout = "Added stdio MCP server"
+        stderr = ""
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return Done()
+
+    installer.install("claude-code", writes=True, say=lambda _: None, run=run)
+    remove, add = calls
+    assert remove[:4] == ["/bin/claude", "mcp", "remove", installer.SERVER_KEY]
+    assert add[1:7] == ["mcp", "add", installer.SERVER_KEY, "-s", "user", "-e"]
+    assert f"{installer.WRITES_VAR}=true" in add
+
+
+def test_claude_code_without_its_cli_prints_the_command(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: None)
+    said = []
+    installer.install("claude-code", say=said.append, run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
+    assert "claude mcp add" in said[0]
+
+
+def test_all_installs_only_where_a_client_is_found(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: None)
+    (tmp_path / ".codex").mkdir()
+    installer.install("all", say=lambda _: None)
+    assert (tmp_path / ".codex/config.toml").exists()
+    assert not (tmp_path / ".cursor").exists() and not (tmp_path / ".config/Claude").exists()
+
+
+def test_broken_json_is_left_alone(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor/mcp.json").write_text("{not json")
+    said = []
+    installer.install("cursor", say=said.append)
+    assert (tmp_path / ".cursor/mcp.json").read_text() == "{not json"
+    assert "isn't valid JSON" in said[0]

@@ -12,6 +12,7 @@ MCP server on the official Python SDK v2 (`mcp>=2.3`, `MCPServer`, not v1's `Fas
 - `src/{{ package_name }}/remote.py` + `tests/test_remote.py`: remote mode (sign-in, the writer role, shared confirmation key, audit sinks). Never weaken a token check or let a claim enable writes on its own; `docs/remote.md` describes the rules.
 - `src/{{ package_name }}/deploy.py` + `tests/test_deploy.py`: `deploy vercel --auth supabase` and `users`. `consent.py` is the sign-in consent page: write untrusted values (app name, return address) with `textContent` only, and keep its CSP, pinned script and integrity hash together.
 - `Dockerfile`, `glama.json`, `docs/publishing.md`: publishing to PyPI, Glama and the MCP Registry.
+- `src/{{ package_name }}/installer.py` + `docs/troubleshooting.md`: `install <client>` for Claude Desktop, Cursor, Claude Code and Codex. When you add a command people run or hit a new setup problem, add it to the troubleshooting guide.
 
 ## Rules
 - Never register a tool with `server.tool()` or `server.add_tool()` directly; that bypasses the guardrails.
