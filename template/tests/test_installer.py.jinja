@@ -74,10 +74,7 @@ def test_codex_keeps_other_settings_and_replaces_its_own_table(tmp_path, monkeyp
     assert 'model = "gpt-5"' in text and "[mcp_servers.other]" in text
     assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1
     assert '"old"' not in text and f'{installer.WRITES_VAR} = "true"' in text
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # Python 3.10
-        return
+    tomllib = pytest.importorskip("tomllib") if installer.sys.version_info >= (3, 11) else pytest.importorskip("tomli")
     parsed = tomllib.loads(text)["mcp_servers"][installer.SERVER_KEY]
     assert parsed["env"] == {installer.WRITES_VAR: "true"} and parsed["args"] == ["-m", "{{ package_name }}"]
 
@@ -179,7 +176,6 @@ def test_codex_leaves_other_spellings_alone_and_says_so(tmp_path, monkeypatch):
 
 
 def test_codex_never_writes_invalid_toml(tmp_path, monkeypatch):
-    pytest.importorskip("tomllib")
     _home(tmp_path, monkeypatch)
     config = tmp_path / ".codex/config.toml"
     config.parent.mkdir()
@@ -203,3 +199,28 @@ def test_a_failed_claude_code_add_is_reported_and_fails(tmp_path, monkeypatch):
     assert not installer.install("claude-code", say=said.append, run=lambda argv, **kw: Failed())
     assert "failed" in said[0] and "unknown option" in said[0]
     assert len(said) == 1  # no "restart the client" line after a failure
+
+
+def test_codex_leaves_a_root_inline_definition_alone(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = f'mcp_servers = ' + '{ "' + installer.SERVER_KEY + '" = { command = "old" } }\n'
+    config.write_text(original)
+    assert not installer.install("codex", say=lambda _: None)
+    assert config.read_text() == original
+
+
+@pytest.mark.parametrize(("code", "stderr", "ok"), [(1, "Permission denied: ~/.claude.json", False), (1, "No MCP server found with name", True)])
+def test_claude_code_remove_reports_real_failures(tmp_path, monkeypatch, code, stderr, ok):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/bin/claude" if name == "claude" else None)
+
+    class Done:
+        returncode = code
+        stdout = ""
+
+    Done.stderr = stderr
+    said = []
+    assert installer.install("claude-code", remove=True, say=said.append, run=lambda argv, **kw: Done()) is ok
+    assert ("failed" in said[0]) is not ok

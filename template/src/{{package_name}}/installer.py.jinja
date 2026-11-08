@@ -176,9 +176,15 @@ def _claude_code(entry: dict[str, Any], *, remove: bool, dry_run: bool, say: Say
         prefix = "Would run" if dry_run else "Claude Code: `claude` isn't on PATH. Install Claude Code, or run"
         say(f"{prefix}: claude {' '.join(_quote(a) for a in (['mcp', 'remove', SERVER_KEY, '-s', 'user'] if remove else add))}")
         return dry_run
-    run([claude, "mcp", "remove", SERVER_KEY, "-s", "user"], capture_output=True, text=True, check=False)
+    removed = run([claude, "mcp", "remove", SERVER_KEY, "-s", "user"], capture_output=True, text=True, check=False)
+    problem = (getattr(removed, "stderr", "") or getattr(removed, "stdout", "") or "").strip()
+    missing = "not found" in problem.lower() or "no mcp server" in problem.lower()
+    if getattr(removed, "returncode", 0) != 0 and not missing:
+        # Couldn't take out the old entry (an unwritable config, say): stop before adding.
+        say(f"Claude Code: `claude mcp remove` failed ({problem or 'no details'}); nothing was changed.")
+        return False
     if remove:
-        say("Claude Code: removed")
+        say("Claude Code: removed" if not missing else f"Claude Code: {SERVER_KEY} wasn't configured")
         return True
     done = run([claude, *add], capture_output=True, text=True, check=False)
     output = (getattr(done, "stdout", "") or "").strip()
@@ -284,16 +290,17 @@ def _defines_ours(line: str, table: tuple[str, ...]) -> bool:
     if table == ("mcp_servers",):
         return any(stripped.startswith(n + "=") or stripped.startswith(n + ".") for n in names)
     if table == ():
-        return any(stripped.startswith(f"mcp_servers.{n}") for n in names)
+        inline = stripped.startswith("mcp_servers=") and any(n in stripped for n in names)
+        return inline or any(stripped.startswith(f"mcp_servers.{n}") for n in names)
     return False
 
 
 def _toml_problem(text: str) -> str | None:
-    """Why `text` isn't valid TOML, where Python can check (3.11+); None if it is, or if it can't."""
-    try:
+    """Why `text` isn't valid TOML, or None if it is (tomllib, or its tomli backport on 3.10)."""
+    if sys.version_info >= (3, 11):
         import tomllib
-    except ModuleNotFoundError:
-        return None
+    else:
+        import tomli as tomllib
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
