@@ -1,0 +1,27 @@
+# Labels each pull request by the files it changes, for the release-note groups in release.yml.
+deploy:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "template/src/*/deploy.py"
+          - "template/src/*/remote.py"
+          - "template/src/*/consent.py"
+          - "template/src/*/server.py.jinja"
+          - "template/docs/remote.md.jinja"
+install:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "template/src/*/installer.py.jinja"
+          - "src/sett_mcp/**"
+guardrails:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "template/src/*/guardrails.py"
+          - "template/src/*/default_policy.yaml.jinja"
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "**/*.md.jinja"
+release:
+  - changed-files:
+      - any-glob-to-any-file: [".github/**"]

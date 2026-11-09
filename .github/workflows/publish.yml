@@ -1,5 +1,5 @@
 # Publishes the `sett-mcp` command to PyPI.
-# Runs when a GitHub release is published, or by hand from the Actions tab ("Run workflow").
+# Runs when a GitHub release is published, or by hand from the Actions tab ("Run workflow", choosing a v* tag).
 # PyPI trusts this workflow directly (trusted publishing), so no API token is stored anywhere.
 name: Publish to PyPI
 
@@ -13,6 +13,9 @@ permissions:
 
 jobs:
   publish:
+    # Only from a release tag: the version is read from the tag, so a run from a branch
+    # would build a ".dev" version, which shouldn't reach PyPI.
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -25,4 +28,9 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv run --extra dev pytest
       - run: uv build
+      - name: Check the built version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ls dist/
+          ls dist/ | grep -q -- "-${tag}-py3" || { echo "dist/ doesn't hold version ${tag}"; exit 1; }
       - run: uv publish

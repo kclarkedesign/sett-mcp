@@ -1,0 +1,16 @@
+# Groups for GitHub's "Generate release notes" button, by PR label.
+# Labels are added automatically from the files a PR changes (.github/labeler.yml).
+changelog:
+  exclude:
+    labels: [release]
+  categories:
+    - title: Remote deploy
+      labels: [deploy]
+    - title: Clients and install
+      labels: [install]
+    - title: Guardrails
+      labels: [guardrails]
+    - title: Docs
+      labels: [docs]
+    - title: Other changes
+      labels: ["*"]
