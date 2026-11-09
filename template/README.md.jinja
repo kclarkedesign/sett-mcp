@@ -117,10 +117,10 @@ Host it at a public URL on your own Vercel account, with Supabase handling sign-
 
 ```bash
 uv run {{ project_slug }} deploy vercel --auth supabase --create-supabase-project
-uv run {{ project_slug }} users add you@example.com --writer
+uv run {{ project_slug }} users add you@example.com --writer   # or several: a@example.com b@example.com
 ```
 
-Then add `https://<your-project>.vercel.app/mcp` as a connector in Claude or Cursor. Every request needs a sign-in, only people you add can sign in, writes need the writer role, and each call lands in an audit table. [docs/remote.md](docs/remote.md) covers what you need first, GitHub sign-in, custom domains, and how to run remote mode on another host or with another OAuth provider.
+Then add `https://<your-project>.vercel.app/mcp` as a connector: in claude.ai, Settings, Connectors, Add custom connector (it then shows in the desktop app too), or in Cursor or Codex ([docs/remote.md](docs/remote.md#connecting-clients) has the steps). Every request needs a sign-in, only people you add can sign in, writes need the writer role, and each call lands in an audit table. [docs/remote.md](docs/remote.md) covers what you need first, GitHub sign-in, custom domains, and how to run remote mode on another host or with another OAuth provider.
 
 ## Publishing
 
