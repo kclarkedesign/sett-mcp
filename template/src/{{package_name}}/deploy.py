@@ -592,7 +592,12 @@ def create_supabase_project(
     if not ref:
         raise DeployError("Supabase created the project but didn't return its ref; find it in the dashboard and pass --supabase-project")
     on_created(ref)
-    say(f"    project {ref}. Database password (shown once, not saved; only for connecting to Postgres directly): {db_pass}")
+    # The password is never printed: the server doesn't use it, and printed secrets end up
+    # in terminal history, screenshots and pasted logs. It can be reset in the dashboard.
+    say(
+        f"    project {ref}. A database password was generated and not saved. You won't need it; "
+        "if you ever connect to Postgres directly, reset it in Project Settings, Database."
+    )
     wait_until_ready(account.for_project(ref), say=say, sleep=sleep, clock=clock)
     return ref
 
