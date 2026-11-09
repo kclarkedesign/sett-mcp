@@ -248,23 +248,42 @@ def _update_codex(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: b
 
 
 def _multiline_state(line: str, in_string: str) -> str:
-    """Whether a multiline string (\"\"\" or \'\'\') is still open after this line."""
-    rest = line
-    while True:
+    """Whether a multiline string (three double or single quotes) is still open after this line.
+
+    Scans character by character, so quotes inside ordinary one-line strings, escaped
+    quotes and comments are not mistaken for the start or end of a multiline string.
+    """
+    basic, literal = '"' * 3, "'" * 3
+    i, n = 0, len(line)
+    while i < n:
         if in_string:
-            end = rest.find(in_string)
-            if end < 0:
-                return in_string
-            rest, in_string = rest[end + 3 :], ""
+            if in_string == basic and line[i] == "\\":
+                i += 2  # an escape inside a basic multiline string
+                continue
+            if line.startswith(in_string, i):
+                # A closing run may hold up to two extra quotes that belong to the string.
+                j = i + 3
+                while j < n and line[j] == in_string[0] and j - i < 5:
+                    j += 1
+                i, in_string = j, ""
+                continue
+            i += 1
             continue
-        # Skip a comment, then find the next opening delimiter on the line.
-        starts = [(rest.find(d), d) for d in ('"' * 3, "'" * 3) if d in rest]
-        hash_at = rest.find("#")
-        starts = [(i, d) for i, d in starts if hash_at < 0 or i < hash_at]
-        if not starts:
+        char = line[i]
+        if char == "#":
             return ""
-        at, delim = min(starts)
-        rest, in_string = rest[at + 3 :], delim
+        if line.startswith(basic, i) or line.startswith(literal, i):
+            in_string, i = line[i : i + 3], i + 3
+            continue
+        if char in "\"'":
+            # An ordinary one-line string: skip to its closing quote (escapes only in "...").
+            j = i + 1
+            while j < n and line[j] != char:
+                j += 2 if (char == '"' and line[j] == "\\") else 1
+            i = j + 1
+            continue
+        i += 1
+    return in_string
 
 
 def _table_key(line: str) -> tuple[str, ...] | None:

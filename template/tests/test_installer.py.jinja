@@ -247,3 +247,33 @@ def test_codex_env_keys_are_quoted(tmp_path, monkeypatch):
     _home(tmp_path, monkeypatch)
     installer.install("codex", writes=True, say=lambda _: None)
     assert f'"{installer.WRITES_VAR}" = "true"' in (tmp_path / ".codex/config.toml").read_text()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "note = '" + '"' * 3 + " in a literal string'",
+        'note = "' + "'" * 3 + ' in a basic string"',
+        'note = "escaped \\" quote, then ' + "'" * 3 + ' inside"',
+        "note = 1  # a comment with " + '"' * 3,
+    ],
+)
+def test_quotes_inside_ordinary_strings_dont_open_a_multiline_string(tmp_path, monkeypatch, line):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    config.write_text(f'{line}\n\n[mcp_servers.{installer.SERVER_KEY}]\ncommand = "old"\n')
+    assert installer.install("codex", say=lambda _: None)
+    text = config.read_text()
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1 and '"old"' not in text
+    assert text.startswith(line)
+
+
+def test_multiline_state_unit_cases():
+    q3, s3 = '"' * 3, "'" * 3
+    assert installer._multiline_state(f"a = {q3}", "") == q3
+    assert installer._multiline_state(f"still text {s3} here", q3) == q3  # the other kind doesn't close it
+    assert installer._multiline_state(f"end {q3}", q3) == ""
+    assert installer._multiline_state(f"a = {q3}one line{q3}", "") == ""
+    assert installer._multiline_state(f"x \\{q3} still open", q3) == q3  # escaped quote
+    assert installer._multiline_state(f"a = {s3}raw \\{s3}", "") == ""  # no escapes in literal strings
