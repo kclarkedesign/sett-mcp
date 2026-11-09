@@ -544,3 +544,40 @@ def test_reads_windows_credential_manager(tmp_path, monkeypatch):
     monkeypatch.setattr(deploy, "_windows_credential", credential)
     assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}) == TOKEN
     assert targets == ["Supabase CLI:supabase", "Supabase CLI:access-token"]
+
+
+def test_the_ref_is_handed_over_before_the_wait():
+    saved = []
+    with pytest.raises(DeployError, match="Run the deploy again later"):
+        create(FakeAccount(polls_until_healthy=10_000), on_created=saved.append)
+    assert saved == [REF]  # known before the wait timed out, so a rerun can resume
+
+
+def test_a_rerun_resumes_a_project_that_was_still_starting(tmp_path, monkeypatch):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server", "supabase_starting": True})
+    for name in ("pyproject.toml", "asgi.py", "vercel.json"):
+        (tmp_path / name).write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    waited, deployed = [], []
+    monkeypatch.setattr(deploy, "wait_until_ready", lambda supabase, **kw: waited.append(supabase.ref))
+    monkeypatch.setattr(deploy, "deploy", lambda options, supabase, vercel: deployed.append(supabase.ref))
+    monkeypatch.setattr(deploy, "create_supabase_project", lambda *a, **k: pytest.fail("created a second project"))
+    server.main(["deploy", "vercel", "--auth", "supabase"])
+    assert waited == [REF] and deployed == [REF]
+    assert "supabase_starting" not in deploy.load_state(tmp_path)
+
+
+def test_create_is_refused_once_a_project_was_saved(tmp_path, monkeypatch, capsys):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server"})
+    for name in ("pyproject.toml", "asgi.py", "vercel.json"):
+        (tmp_path / name).write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    with pytest.raises(SystemExit):
+        server.main(["deploy", "vercel", "--auth", "supabase", "--create-supabase-project"])
+    assert "already has Supabase project" in capsys.readouterr().err

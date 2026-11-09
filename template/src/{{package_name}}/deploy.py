@@ -528,8 +528,14 @@ def create_supabase_project(
     say: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    on_created: Callable[[str], None] = lambda ref: None,
 ) -> str:
-    """Create a Supabase project for this server and wait until it's ready. Returns its ref."""
+    """Create a Supabase project for this server and wait until it's ready. Returns its ref.
+
+    `on_created` gets the ref as soon as Supabase returns it, before the wait, so the
+    caller can save it: a run stopped while waiting then resumes instead of creating
+    a second project.
+    """
     orgs = account.organizations()
     if organization:
         chosen = [o for o in orgs if organization in (o.get("slug"), o.get("name"))]
@@ -553,6 +559,7 @@ def create_supabase_project(
         ) from exc
     if not ref:
         raise DeployError("Supabase created the project but didn't return its ref; find it in the dashboard and pass --supabase-project")
+    on_created(ref)
     say(f"    project {ref}. Database password (shown once, not saved; only for connecting to Postgres directly): {db_pass}")
     wait_until_ready(account.for_project(ref), say=say, sleep=sleep, clock=clock)
     return ref

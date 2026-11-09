@@ -280,9 +280,23 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
                 f"This server already has Supabase project {ref}. Drop --create-supabase-project to deploy to it."
             )
         account = deploy.SupabaseAccount(token)
-        ref = deploy.create_supabase_project(account, vercel_project, organization=args.supabase_org, region=args.region)
-        # Saved at once, so a later step failing doesn't lead to a second project on the next run.
-        deploy.save_state(cwd, {**state, "supabase_project": ref, "vercel_project": vercel_project})
+
+        def remember(new_ref: str) -> None:
+            # Saved the moment Supabase returns it: a run stopped while the project starts
+            # resumes on the next run instead of creating a second project.
+            state.update({"supabase_project": new_ref, "vercel_project": vercel_project, "supabase_starting": True})
+            deploy.save_state(cwd, state)
+
+        ref = deploy.create_supabase_project(
+            account, vercel_project, organization=args.supabase_org, region=args.region, on_created=remember
+        )
+        state.pop("supabase_starting", None)
+        deploy.save_state(cwd, state)
+    elif ref and state.get("supabase_starting"):
+        # An earlier run created the project but stopped before it was ready.
+        deploy.wait_until_ready(deploy.Supabase(token, deploy.project_ref(ref)))
+        state.pop("supabase_starting", None)
+        deploy.save_state(cwd, state)
     if not ref:
         raise deploy.DeployError(
             "Which Supabase project? Add --create-supabase-project to make one for this server, or pass "
