@@ -16,3 +16,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/labeler@v5
+        with:
+          sync-labels: true  # take a label off again when a later push no longer touches its files

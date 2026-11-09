@@ -22,6 +22,6 @@ docs:
       - any-glob-to-any-file:
           - "**/*.md"
           - "**/*.md.jinja"
-release:
+ci:
   - changed-files:
       - any-glob-to-any-file: [".github/**"]
