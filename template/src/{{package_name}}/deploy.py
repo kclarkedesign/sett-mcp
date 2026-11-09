@@ -372,6 +372,7 @@ class Vercel:
         self._cwd = cwd
         self._scope = scope
         self._run = run
+        self._legacy_env = False
 
     def _vercel(self, *args: str, stdin: str | None = None, check: bool = True) -> str:
         argv = ["vercel", *args, "--cwd", str(self._cwd)]
@@ -431,17 +432,32 @@ class Vercel:
         if self.linked_project() == project and not relink:
             return
         self.current_team()
-        self._vercel("project", "add", project, check=False)  # already there is fine
-        self._vercel("link", "--yes", "--project", project)
+        try:
+            # Current CLIs create the project here if it doesn't exist yet.
+            self._vercel("link", "--yes", "--project", project)
+        except DeployError:
+            # Older CLIs only link existing projects: create it, then link.
+            self._vercel("project", "add", project, check=False)
+            self._vercel("link", "--yes", "--project", project)
+
+    def _env(self, *args: str, stdin: str | None = None) -> str:
+        """`vercel env ...` for production: --environment on current CLIs, the older argument otherwise."""
+        if not self._legacy_env:
+            try:
+                return self._vercel("env", *args, "--environment", "production", stdin=stdin)
+            except DeployError:
+                self._legacy_env = True  # an older CLI; if it fails again below, that error stands
+        command, *rest = args
+        return self._vercel("env", command, *rest[:1], "production", *rest[1:], stdin=stdin)
 
     def env_names(self) -> set[str]:
         # Fails loudly: an empty answer from a failed lookup would look like "nothing set
         # yet" and replace the shared key.
-        out = self._vercel("env", "ls", "production")
+        out = self._env("ls")
         return set(re.findall(r"\b[A-Z][A-Z0-9_]+\b", out))
 
     def set_env(self, name: str, value: str) -> None:
-        self._vercel("env", "add", name, "production", "--force", stdin=value)
+        self._env("add", name, "--force", stdin=value)
 
     def deploy(self) -> str:
         out = self._vercel("deploy", "--prod", "--yes")

@@ -186,7 +186,7 @@ def test_an_already_linked_folder_is_not_linked_again(run, tmp_path):
     (tmp_path / ".vercel").mkdir()
     (tmp_path / ".vercel" / "project.json").write_text('{"projectId": "p", "orgId": "o", "projectName": "my-server"}')
     _, _, vercel = run()
-    assert not vercel.ran("link") and not vercel.ran("project", "add")
+    assert not vercel.ran("link") and not vercel.ran("project", "add") and not vercel.ran("project", "create")
 
 
 def test_naming_a_team_relinks_even_when_the_folder_is_linked(run, tmp_path):
@@ -645,3 +645,31 @@ def test_a_profile_file_is_resolved_to_its_name(tmp_path, monkeypatch):
 
     deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path), "SUPABASE_PROFILE": str(profile)}, run=lambda argv, **kw: asked.append(argv) or Missing())
     assert asked[0][-2] == "work-profile"
+
+
+def test_current_vercel_cli_forms_cause_no_deprecation_warnings(run):
+    _, _, vercel = run()
+    env_commands = vercel.ran("env")
+    assert env_commands and all("--environment" in c for c in env_commands)
+    assert not vercel.ran("project", "add")  # `vercel link --yes --project` creates the project
+
+
+def test_older_vercel_clis_get_the_older_forms(run):
+    class OldCli(FakeVercel):
+        def __call__(self, argv, stdin):
+            args = argv[1 : argv.index("--cwd")]
+            if "--environment" in args:  # not known to this CLI
+                self.commands.append(argv)
+                return 1, "", "unknown option --environment"
+            if args[0] == "link" and not self.ran("project", "add"):
+                self.commands.append(argv)
+                return 1, "", "Project not found"
+            return super().__call__(argv, stdin)
+
+    _, _, vercel = run(vercel=OldCli())
+    assert vercel.ran("project", "add") and len(vercel.ran("link")) == 2
+    assert vercel.env[f"{PREFIX}_SUPABASE_URL"] == f"https://{REF}.supabase.co"
+    old_adds = [c for c in vercel.ran("env", "add") if "--environment" not in c]
+    assert old_adds and old_adds[0][4] == "production"  # vercel env add NAME production --force
+    # The lookup fell back once; later commands went straight to the older form.
+    assert len([c for c in vercel.ran("env") if "--environment" in c]) == 1
