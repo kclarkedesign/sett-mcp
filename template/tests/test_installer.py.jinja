@@ -277,3 +277,13 @@ def test_multiline_state_unit_cases():
     assert installer._multiline_state(f"a = {q3}one line{q3}", "") == ""
     assert installer._multiline_state(f"x \\{q3} still open", q3) == q3  # escaped quote
     assert installer._multiline_state(f"a = {s3}raw \\{s3}", "") == ""  # no escapes in literal strings
+
+
+def test_a_dotted_definition_opening_a_multiline_string_is_still_recognised(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = f'mcp_servers.{installer.SERVER_KEY}.command = ' + '"' * 3 + '\nold\n' + '"' * 3 + '\n'
+    config.write_text(original)
+    assert not installer.install("codex", remove=True, say=lambda _: None)
+    assert config.read_text() == original
