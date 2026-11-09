@@ -1,4 +1,6 @@
 # Labels each pull request by the files it changes, for the release-note groups in release.yml.
+# The labels must exist in the repo already (the workflow can't create them with its
+# narrow permissions): deploy, install, guardrails, docs, ci. Add a new one in the repo first.
 deploy:
   - changed-files:
       - any-glob-to-any-file:

@@ -29,8 +29,16 @@ jobs:
       - run: uv run --extra dev pytest
       - run: uv build
       - name: Check the built version matches the tag
+        # Compared as normalized versions: a tag v1.2.3-rc1 builds a wheel named 1.2.3rc1.
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          ls dist/
-          ls dist/ | grep -q -- "-${tag}-py3" || { echo "dist/ doesn't hold version ${tag}"; exit 1; }
+          uv run --no-project --with packaging python - <<'PY'
+          import os, pathlib
+          from packaging.utils import parse_wheel_filename
+          from packaging.version import Version
+          tag = Version(os.environ["GITHUB_REF_NAME"].removeprefix("v"))
+          built = {parse_wheel_filename(p.name)[1] for p in pathlib.Path("dist").glob("*.whl")}
+          print(f"tag {tag}, built {sorted(map(str, built))}")
+          if built != {tag}:
+              raise SystemExit(f"dist/ doesn't hold version {tag}")
+          PY
       - run: uv publish
