@@ -45,6 +45,13 @@ What it does, in order:
 
 **Free plans:** Vercel's Hobby plan is for non-commercial use, so a server for a business needs Vercel Pro. A free Supabase project pauses after about a week without activity, and sign-in stops until you restore it in the dashboard; check both providers' current terms before relying on a free plan.
 
+Before you share the address, test it the way clients will:
+
+```bash
+uvx sett-mcp check https://<your-project>.vercel.app/mcp
+uvx sett-mcp check https://<your-project>.vercel.app/mcp --token -   # also check the tools (asks for an access token)
+```
+
 ### Who can sign in
 
 New sign-ups are off, so add people first. They sign in with GitHub (using the same email) or a link sent to their email:

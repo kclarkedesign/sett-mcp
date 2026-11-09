@@ -81,6 +81,8 @@ uv run my-server deploy vercel --auth supabase --create-supabase-project --write
 uv run my-server users add you@example.com --writer      # several at once: ada@example.com bob@example.com
 ```
 
+Before sharing the address, test it the way clients will: `uvx sett-mcp check https://<your-project>.vercel.app/mcp`. It lists PASS, WARN and FAIL with a fix for each.
+
 Then, in claude.ai: **Settings, Connectors, Add custom connector**, paste `https://<your-project>.vercel.app/mcp`, connect, sign in on the consent page (GitHub, or an emailed link opened in the same browser) and choose **Allow**. Your project's `docs/remote.md` has the same steps for Cursor and Codex.
 
 Before the first deploy, install and sign in to two command-line tools, once: `npm install -g vercel` then `vercel login`, and the [Supabase CLI](https://supabase.com/docs/guides/cli) then `supabase login`. Both open a browser. The deploy creates the Supabase project itself. If you belong to several Supabase organizations, it asks which: add `--supabase-org "Org name"` (in quotes) or the slug it lists, and pick a free organization unless you mean to pay for the project. Your project's `docs/remote.md` has the details.
