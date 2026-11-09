@@ -7,8 +7,10 @@ license = "{{ license }}"
 authors = [{ name = {{ author_name | tojson }}{% if author_email %}, email = "{{ author_email }}"{% endif %} }]
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=2.2,<3",
+    "mcp>=2.3,<3",
+    "pyjwt[crypto]>=2.8",  # remote mode checks ES256/RS256 sign-in tokens
     "pyyaml>=6,<7",
+    "tomli>=2; python_version < '3.11'",  # checks Codex's config.toml before `install codex` writes it
 ]
 
 [project.optional-dependencies]

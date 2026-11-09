@@ -1,0 +1,8 @@
+"""Entry point Vercel finds on its own (it looks for `asgi.py` at the project root).
+
+The app itself is `{{ package_name }}.asgi:app`; see `{{ project_slug }} deploy vercel`.
+"""
+
+from {{ package_name }}.asgi import app
+
+__all__ = ["app"]

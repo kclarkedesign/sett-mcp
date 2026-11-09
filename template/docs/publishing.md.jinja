@@ -1,0 +1,51 @@
+# Publishing {{ project_name }}
+
+Do these in order: each step builds on the one before.
+
+## 1. PyPI
+
+Publishing to PyPI lets anyone run the server with `uvx {{ project_slug }}`, no clone needed.
+
+1. Create an account at [pypi.org](https://pypi.org/account/register/) and turn on two-factor login.
+2. Under **Your account → Publishing**, add a pending publisher: project `{{ project_slug }}`, owner `{{ github_user }}`, repository `{{ project_slug }}`, workflow `release.yml`, environment `pypi`. No token is stored anywhere; PyPI trusts that one workflow.
+3. Push a version tag, for example `git tag v0.1.0 && git push origin v0.1.0`. The release workflow runs the tests, then publishes.
+
+The version comes from `pyproject.toml`, so bump it before each tag. Once it's published, `uv run {{ project_slug }} install claude-desktop --use-uvx` (or `install all --use-uvx`) writes client configs that run the published package.
+
+## 2. Glama
+
+[Glama](https://glama.ai/mcp/servers) is a large MCP directory. It builds your server, starts it, and scores the tools. A listing there is also required by the awesome-mcp-servers list (step 3).
+
+1. Check `glama.json`: `maintainers` should be your GitHub username.
+2. At [glama.ai/mcp/servers](https://glama.ai/mcp/servers), sign in with GitHub and add the server under **Runs from source**, with your repository URL.
+3. Once it's approved, open **Admin → Dockerfile** and fill in the form:
+   - Python version: `3.13`
+   - Build steps: `["uv sync --python 3.13"]`
+   - CMD arguments: `["uv", "run", "--no-sync", "{{ project_slug }}"]`
+   - Leave the environment variables and placeholder parameters empty. The server starts with no settings, and writes stay off, which is what Glama should test.
+4. Click **Build**. When it passes, click **Build & Release**.
+5. Copy the **Score Badge** from the **GitHub Badge** tab into this README.
+
+**Try in Browser** on the server page starts a sandbox copy; running one tool there counts as usage for Glama's score.
+
+## 3. awesome-mcp-servers
+
+[punkpeye/awesome-mcp-servers](https://github.com/punkpeye/awesome-mcp-servers) is the most-read MCP list. Open a pull request that adds one line to the best-fitting category, including your Glama score badge (a bot labels entries without one `missing-glama`):
+
+```markdown
+- [{{ github_user }}/{{ project_slug }}](https://github.com/{{ github_user }}/{{ project_slug }}) [![{{ github_user }}/{{ project_slug }} MCP server](https://glama.ai/mcp/servers/{{ github_user }}/{{ project_slug }}/badges/score.svg)](https://glama.ai/mcp/servers/{{ github_user }}/{{ project_slug }}) 🐍 🏠 - One sentence on what the server does.
+```
+
+The emoji after the badge are the list's legend: 🐍 Python, 🏠 runs locally, ☁️ talks to a cloud service.
+
+## 4. The official MCP Registry
+
+The [MCP Registry](https://registry.modelcontextprotocol.io) is the directory clients are starting to read from. The registry's file format is still changing, so follow the official [quickstart](https://modelcontextprotocol.io/registry/quickstart) for details. In outline:
+
+1. Publish to PyPI first (step 1). The registry checks the published package.
+2. The registry proves you own the PyPI package by looking for this line in its README, which this project's README already has as an HTML comment:
+   `mcp-name: io.github.{{ github_user }}/{{ project_slug }}`
+3. Install `mcp-publisher` (the quickstart has installers), then from this folder run `mcp-publisher init` and edit the generated `server.json`. Its `name` must match the `mcp-name` line exactly, and the package version must already be on PyPI.
+4. `mcp-publisher login github`, then `mcp-publisher publish`.
+
+Each version can be published once, so bump the version in `pyproject.toml` and `server.json` together.

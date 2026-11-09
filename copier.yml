@@ -5,10 +5,11 @@ _message_after_copy: |
   Created {{ project_slug }}. Next:
 
     cd {{ _copier_conf.dst_path }}
-    uv run {{ project_slug }} install-claude-desktop   # or see README for Claude Code
+    uv sync
     uv run --extra dev pytest
+    uv run {{ project_slug }} install claude-desktop   # or cursor, claude-code, codex, all
 
-  Writes are off until you set {{ env_prefix }}_ENABLE_WRITES=true.
+  Writes are off until you install with --writes. Stuck? See docs/troubleshooting.md.
 
 project_name:
   type: str
@@ -36,6 +37,7 @@ env_prefix:
   type: str
   help: Prefix for environment variables
   default: "{{ package_name | upper }}"
+  validator: "{% if not (env_prefix | regex_search('^[A-Z][A-Z0-9_]*$')) %}Use capital letters, digits and underscores{% endif %}"
 
 description:
   type: str

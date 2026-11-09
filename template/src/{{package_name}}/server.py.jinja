@@ -1,16 +1,29 @@
-"""Entry point: builds the server and runs it over stdio (default) or HTTP."""
+"""Entry point: builds the server and runs it over stdio (default) or HTTP.
+
+`create_app()` is the ASGI app for hosting (see `asgi.py`). It refuses to start without
+sign-in configured, so a deployed server is never accidentally open to the internet.
+"""
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
+from collections.abc import Mapping
+
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
+from mcp.server.request_state import RequestStateSecurity
+from mcp.server.transport_security import TransportSecuritySettings
 
-from .guardrails import Guardrails, Policy
+from . import consent
+from .guardrails import _TRUTHY, AuditSink, Guardrails, Policy
+from .remote import JWTVerifier, RemoteConfigError, RemoteSettings, StderrAuditSink, SupabaseAuditSink
 from .store import ContactStore
 from .tools import register_tools
 
@@ -18,24 +31,138 @@ ENV_PREFIX = "{{ env_prefix }}"
 log = logging.getLogger("{{ package_name }}")
 
 
-def build_server(policy: Policy | None = None, store: ContactStore | None = None) -> MCPServer:
+def build_server(
+    policy: Policy | None = None,
+    store: ContactStore | None = None,
+    remote: RemoteSettings | None = None,
+) -> MCPServer:
+    """Build the server. With `remote`, every request must carry a valid sign-in."""
     policy = policy or Policy.load(ENV_PREFIX, package=__package__)
     if store is None:
         data_path = os.environ.get(f"{ENV_PREFIX}_DATA_PATH")
         store = ContactStore.open(__package__, Path(data_path).expanduser() if data_path else None)
 
+    auth: dict[str, Any] = {}
+    sinks: list[AuditSink] = []
+    if remote is not None:
+        auth = {
+            "token_verifier": JWTVerifier(remote),
+            "auth": AuthSettings(
+                issuer_url=remote.issuer,
+                resource_server_url=remote.resource_url,
+                validate_token_resource=True,
+            ),
+            # Shared across instances, so a confirmation can finish on a different one.
+            "request_state_security": RequestStateSecurity(keys=list(remote.request_state_keys)),
+        }
+        sinks.append(StderrAuditSink())
+        if remote.supabase_url and remote.audit_key:
+            sinks.append(SupabaseAuditSink(remote.supabase_url, remote.audit_key))
+
     server = MCPServer(
         {{ project_name | tojson }},
         instructions={{ description | tojson }},
+        **auth,
     )
-    guard = Guardrails(server, policy)
+    guard = Guardrails(
+        server,
+        policy,
+        writer_check=remote.is_writer if remote is not None else None,
+        audit_sinks=sinks,
+    )
     register_tools(guard, store)
     log.info(
-        "Registered tools: %s (writes %s)",
+        "Registered tools: %s (writes %s%s)",
         ", ".join(guard.registered),
         "enabled" if policy.writes_enabled else "disabled",
+        ", writer role required" if remote is not None and policy.writes_enabled else "",
     )
     return server
+
+
+def http_app(server: MCPServer, host: str = "127.0.0.1", remote: RemoteSettings | None = None) -> Any:
+    """The server as a stateless Streamable HTTP app, served at /mcp.
+
+    Stateless means any replica can answer any request, and responses are plain JSON.
+    A stateless server has no event stream to offer, so GET /mcp answers 405 instead of
+    holding an empty stream open. The SDK's checks stay in place: requests from other
+    websites (Origin) and unexpected Host headers are refused, and bodies over 4 MB are
+    rejected. With `remote`, the Host and Origin checks accept the public URL's host, and
+    with a Supabase publishable key the sign-in consent page is served at /oauth/consent.
+    """
+    security = None
+    if remote is not None:
+        security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[pattern for h in remote.allowed_hosts for pattern in (h, f"{h}:*")],
+            allowed_origins=list(remote.allowed_origins),
+        )
+    app = server.streamable_http_app(
+        stateless_http=True, json_response=True, host=host, transport_security=security
+    )
+    not_allowed = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Method Not Allowed: this server is stateless; POST requests to /mcp."},
+        }
+    ).encode()
+
+    consent_page = None
+    if remote is not None and remote.supabase_url and remote.publishable_key:
+        consent_page = ({{ project_name | tojson }}, remote.supabase_url, remote.publishable_key)
+
+    async def asgi(scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"].rstrip("/") == "/mcp":
+            headers = [(b"content-type", b"application/json"), (b"allow", b"POST")]
+            await send({"type": "http.response.start", "status": 405, "headers": headers})
+            await send({"type": "http.response.body", "body": not_allowed})
+            return
+        if consent_page and scope["type"] == "http" and scope["path"].rstrip("/") == consent.PATH:
+            if not _host_allowed(scope, remote):
+                # The page builds its sign-in return address from the host, so only serve it
+                # on this server's own hosts, as the SDK does for /mcp.
+                await send({"type": "http.response.start", "status": 421, "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"Misdirected request"})
+                return
+            if scope["method"] in ("GET", "HEAD"):
+                body, headers = consent.render(*consent_page)
+                await send({"type": "http.response.start", "status": 200, "headers": headers})
+                await send({"type": "http.response.body", "body": b"" if scope["method"] == "HEAD" else body})
+            else:
+                await send({"type": "http.response.start", "status": 405, "headers": [(b"allow", b"GET")]})
+                await send({"type": "http.response.body", "body": b""})
+            return
+        await app(scope, receive, send)
+
+    return asgi
+
+
+def _host_allowed(scope: dict, remote: RemoteSettings | None) -> bool:
+    if remote is None:
+        return False
+    host = next((v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"host"), "").lower()
+    return host in remote.allowed_hosts or host.rsplit(":", 1)[0] in remote.allowed_hosts
+
+
+def create_app(env: Mapping[str, str] = os.environ) -> Any:
+    """The ASGI app for hosting (Vercel, containers): sign-in required.
+
+    Without an authorization server configured it refuses to start, unless
+    `{{ env_prefix }}_ALLOW_UNAUTHENTICATED=true` says the network around it is private.
+    """
+    remote = RemoteSettings.from_env(ENV_PREFIX, env)
+    if remote is None:
+        if env.get(f"{ENV_PREFIX}_ALLOW_UNAUTHENTICATED", "").strip().lower() not in _TRUTHY:
+            raise RemoteConfigError(
+                f"No sign-in is configured, so this server would be open to anyone who finds its URL. "
+                f"Set {ENV_PREFIX}_SUPABASE_URL (or {ENV_PREFIX}_AUTH_ISSUER), or set "
+                f"{ENV_PREFIX}_ALLOW_UNAUTHENTICATED=true if it only runs on a private network."
+            )
+        log.warning("Serving without sign-in (%s_ALLOW_UNAUTHENTICATED is set)", ENV_PREFIX)
+        return http_app(build_server(), host="0.0.0.0")
+    log.info("Sign-in required: issuer %s, resource %s", remote.issuer, remote.resource_url)
+    return http_app(build_server(remote=remote), host="0.0.0.0", remote=remote)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -50,31 +177,159 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
 
-    install = commands.add_parser("install-claude-desktop", help="Add this server to Claude Desktop's config")
-    install.add_argument("--use-uvx", action="store_true", help="Launch with `uvx {{ project_slug }}` (after publishing to PyPI)")
-    install.add_argument("--dry-run", action="store_true", help="Print the config instead of writing it")
+    install = commands.add_parser("install", help="Add this server to an MCP client (Claude Desktop, Cursor, Claude Code, Codex)")
+    install.add_argument("client", choices=["claude-desktop", "cursor", "claude-code", "codex", "all"], help="Which client; `all` = every one found")
+    legacy = commands.add_parser("install-claude-desktop", help="Same as `install claude-desktop`")
+    for command in (install, legacy):
+        command.add_argument("--writes", action="store_true", help="Turn write tools on for this client ({{ env_prefix }}_ENABLE_WRITES=true)")
+        command.add_argument("--use-uvx", action="store_true", help="Launch with `uvx {{ project_slug }}` (after publishing to PyPI)")
+        command.add_argument("--remove", action="store_true", help="Take this server out of the client's config")
+        command.add_argument("--dry-run", action="store_true", help="Print the change instead of making it")
+
+    deploy = commands.add_parser("deploy", help="Host this server at a public URL, with sign-in (docs/remote.md)")
+    targets = deploy.add_subparsers(dest="target", required=True)
+    vercel = targets.add_parser("vercel", help="Deploy to your Vercel account, with Supabase for sign-in")
+    vercel.add_argument("--auth", choices=["supabase"], default="supabase", help="Who handles sign-in")
+    vercel.add_argument("--supabase-project", help="Project ref or URL (saved after the first deploy)")
+    vercel.add_argument("--create-supabase-project", action="store_true", help="Create a Supabase project for this server")
+    vercel.add_argument("--supabase-org", help="Organization for the new project, if you have more than one")
+    vercel.add_argument("--region", default="americas", help="Region for the new project: americas, emea, apac or a code such as eu-central-1")
+    vercel.add_argument("--vercel-project", help="Vercel project name (default: {{ project_slug }})")
+    vercel.add_argument("--scope", help="Vercel team slug (default: the CLI's current team; `vercel teams ls` lists them)")
+    vercel.add_argument("--writes", action="store_true", help="Let users with the writer role write")
+    vercel.add_argument("--github-client-id", help="Turn on GitHub sign-in (secret from GITHUB_CLIENT_SECRET or a prompt)")
+    vercel.add_argument("--yes", action="store_true", help="Replace the Supabase project's Site URL if it's set elsewhere")
+
+    users = commands.add_parser("users", help="Manage who can sign in to the deployed server")
+    users.add_argument("--supabase-project", help="Project ref or URL (default: the one the deploy saved)")
+    user_commands = users.add_subparsers(dest="action", required=True)
+    emails_help = "One or more emails, separated by spaces or commas"
+    add = user_commands.add_parser("add", help="Let people sign in")
+    add.add_argument("emails", nargs="+", help=emails_help)
+    add.add_argument("--writer", action="store_true", help="Also give them the writer role")
+    user_commands.add_parser("grant", help="Give people the writer role").add_argument("emails", nargs="+", help=emails_help)
+    user_commands.add_parser("revoke", help="Take the writer role away").add_argument("emails", nargs="+", help=emails_help)
+    user_commands.add_parser("list", help="List everyone who can sign in")
 
     args = parser.parse_args(argv)
     # stdout carries the MCP protocol over stdio, so all logging goes to stderr.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
 
-    if args.command == "install-claude-desktop":
-        from .installer import install_claude_desktop
+    if args.command in ("install", "install-claude-desktop"):
+        from .installer import install
 
-        install_claude_desktop(use_uvx=args.use_uvx, dry_run=args.dry_run)
+        client = args.client if args.command == "install" else "claude-desktop"
+        if not install(client, writes=args.writes, use_uvx=args.use_uvx, dry_run=args.dry_run, remove=args.remove):
+            raise SystemExit(1)
         return
 
-    server = build_server()
+    if args.command in ("deploy", "users"):
+        from .deploy import DeployError
+
+        try:
+            _deploy_or_users(args)
+        except (DeployError, KeyboardInterrupt) as exc:
+            sys.stderr.write(f"\n{exc or 'Stopped.'}\n")
+            raise SystemExit(1) from None
+        return
+
     if getattr(args, "http", False):
-        log.warning(
-            "HTTP mode has no authentication yet. It listens on %s:%s; keep it on localhost "
-            "or behind an authenticating proxy.",
-            args.host,
-            args.port,
-        )
-        server.run("streamable-http", host=args.host, port=args.port, stateless_http=True, json_response=True)
+        import uvicorn
+
+        remote = RemoteSettings.from_env(ENV_PREFIX, os.environ)
+        if remote is None:
+            log.warning(
+                "HTTP mode without sign-in, listening on %s:%s. Keep it on localhost, or configure "
+                "sign-in (see docs/remote.md).",
+                args.host,
+                args.port,
+            )
+        server = build_server(remote=remote)
+        uvicorn.run(http_app(server, host=args.host, remote=remote), host=args.host, port=args.port, log_level="info")
     else:
-        server.run()
+        build_server().run()
+
+
+def _deploy_or_users(args: argparse.Namespace) -> None:
+    import getpass
+
+    from . import deploy
+
+    cwd = Path.cwd()
+    if args.command == "users":
+        supabase = deploy.supabase_for(cwd, args.supabase_project)
+        if args.action == "list":
+            deploy.list_users(supabase)
+            return
+        emails = [e.strip() for value in args.emails for e in value.split(",") if e.strip()]
+        failed = []
+        for email in emails:
+            try:
+                if args.action == "add":
+                    deploy.add_user(supabase, email, args.writer)
+                else:
+                    deploy.set_writer(supabase, email, args.action == "grant")
+            except deploy.DeployError as exc:  # carry on with the others, then report
+                sys.stderr.write(f"{exc}\n")
+                failed.append(email)
+        if failed:
+            raise deploy.DeployError(f"Not done for: {', '.join(failed)}")
+        return
+
+    if not all((cwd / name).exists() for name in ("pyproject.toml", "asgi.py", "vercel.json")):
+        raise deploy.DeployError(
+            "Run the deploy from the project folder, the one with pyproject.toml, asgi.py and vercel.json "
+            "(vercel.json tells Vercel to run the app as Python)"
+        )
+    state = deploy.load_state(cwd)
+    ref = args.supabase_project or state.get("supabase_project")
+    vercel_project = args.vercel_project or state.get("vercel_project") or "{{ project_slug }}"
+    token = deploy.access_token(os.environ)
+    if args.create_supabase_project:
+        if ref:
+            raise deploy.DeployError(
+                f"This server already has Supabase project {ref}. Drop --create-supabase-project to deploy to it."
+            )
+        account = deploy.SupabaseAccount(token)
+
+        def remember(new_ref: str) -> None:
+            # Saved the moment Supabase returns it: a run stopped while the project starts
+            # resumes on the next run instead of creating a second project.
+            state.update({"supabase_project": new_ref, "vercel_project": vercel_project, "supabase_starting": True})
+            deploy.save_state(cwd, state)
+
+        ref = deploy.create_supabase_project(
+            account, vercel_project, organization=args.supabase_org, region=args.region, on_created=remember
+        )
+        state.pop("supabase_starting", None)
+        deploy.save_state(cwd, state)
+    elif ref and state.get("supabase_starting"):
+        # An earlier run created the project but stopped before it was ready.
+        deploy.wait_until_ready(deploy.Supabase(token, deploy.project_ref(ref)))
+        state.pop("supabase_starting", None)
+        deploy.save_state(cwd, state)
+    if not ref:
+        raise deploy.DeployError(
+            "Which Supabase project? Add --create-supabase-project to make one for this server, or pass "
+            "--supabase-project <ref> for one you made (the ref is in its dashboard URL)"
+        )
+    github_secret = None
+    if args.github_client_id:
+        github_secret = os.environ.get("GITHUB_CLIENT_SECRET", "").strip() or getpass.getpass("GitHub client secret: ").strip()
+    scope = args.scope or state.get("vercel_scope")
+    options = deploy.DeployOptions(
+        vercel_project=vercel_project,
+        env_prefix=ENV_PREFIX,
+        cwd=cwd,
+        enable_writes=args.writes,
+        github_client_id=args.github_client_id,
+        github_secret=github_secret,
+        yes=args.yes,
+        command="uv run {{ project_slug }}",
+        team_chosen=bool(args.scope),
+    )
+    supabase = deploy.Supabase(token, deploy.project_ref(ref))
+    deploy.deploy(options, supabase, deploy.Vercel(cwd, scope))
 
 
 if __name__ == "__main__":

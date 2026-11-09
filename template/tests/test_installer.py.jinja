@@ -1,0 +1,289 @@
+import json
+
+import pytest
+
+from {{ package_name }} import installer
+
+
+def test_windows_updates_every_claude_desktop_install(tmp_path, monkeypatch):
+    roaming, local = tmp_path / "Roaming", tmp_path / "Local"
+    store_build = local / "Packages/Claude_abc123/LocalCache/Roaming/Claude"
+    data_dir = local / "Claude-Data/claude_abc123"
+    for d in (store_build, data_dir):
+        d.mkdir(parents=True)
+    (data_dir / "claude_desktop_config.json").write_text('{"mcpServers": {"other": {}}}')
+    monkeypatch.setattr(installer.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+
+    installer.install_claude_desktop(use_uvx=True, dry_run=False)
+
+    for d in (store_build, data_dir):
+        servers = json.loads((d / "claude_desktop_config.json").read_text())["mcpServers"]
+        assert installer.SERVER_KEY in servers
+    assert "other" in json.loads((data_dir / "claude_desktop_config.json").read_text())["mcpServers"]
+    assert (data_dir / "claude_desktop_config.json.bak").exists()
+    assert not roaming.exists()
+
+
+def test_windows_falls_back_to_appdata(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    assert installer.config_paths() == [tmp_path / "Roaming/Claude/claude_desktop_config.json"]
+
+
+def _home(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.setattr(installer.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+
+def test_writes_are_off_unless_asked(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    installer.install("cursor", say=lambda _: None)
+    entry = json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"][installer.SERVER_KEY]
+    assert entry["env"] == {installer.WRITES_VAR: "false"}
+
+    installer.install("cursor", writes=True, say=lambda _: None)
+    entry = json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"][installer.SERVER_KEY]
+    assert entry["env"] == {installer.WRITES_VAR: "true"}
+    assert (tmp_path / ".cursor/mcp.json.bak").exists()
+
+
+def test_remove_takes_only_this_server_out(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor/mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}')
+    installer.install("cursor", say=lambda _: None)
+    installer.install("cursor", remove=True, say=lambda _: None)
+    assert json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"] == {"other": {"command": "x"}}
+
+
+def test_codex_keeps_other_settings_and_replaces_its_own_table(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        'model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\n\n'
+        f'[mcp_servers.{installer.SERVER_KEY}]\ncommand = "old"\n\n[mcp_servers.{installer.SERVER_KEY}.env]\nX = "1"\n'
+    )
+    installer.install("codex", writes=True, say=lambda _: None)
+    text = config.read_text()
+    assert 'model = "gpt-5"' in text and "[mcp_servers.other]" in text
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1
+    assert '"old"' not in text and f'"{installer.WRITES_VAR}" = "true"' in text
+    tomllib = pytest.importorskip("tomllib") if installer.sys.version_info >= (3, 11) else pytest.importorskip("tomli")
+    parsed = tomllib.loads(text)["mcp_servers"][installer.SERVER_KEY]
+    assert parsed["env"] == {installer.WRITES_VAR: "true"} and parsed["args"] == ["-m", "{{ package_name }}"]
+
+    installer.install("codex", remove=True, say=lambda _: None)
+    assert installer.SERVER_KEY not in config.read_text() and "[mcp_servers.other]" in config.read_text()
+
+
+def test_claude_code_uses_its_cli_at_user_scope(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/bin/claude" if name == "claude" else None)
+    calls = []
+
+    class Done:
+        stdout = "Added stdio MCP server"
+        stderr = ""
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return Done()
+
+    installer.install("claude-code", writes=True, say=lambda _: None, run=run)
+    remove, add = calls
+    assert remove[:4] == ["/bin/claude", "mcp", "remove", installer.SERVER_KEY]
+    assert add[1:7] == ["mcp", "add", installer.SERVER_KEY, "-s", "user", "-e"]
+    assert f"{installer.WRITES_VAR}=true" in add
+
+
+def test_claude_code_without_its_cli_prints_the_command(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: None)
+    said = []
+    installer.install("claude-code", say=said.append, run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
+    assert "claude mcp add" in said[0]
+
+
+def test_all_installs_only_where_a_client_is_found(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: None)
+    (tmp_path / ".codex").mkdir()
+    installer.install("all", say=lambda _: None)
+    assert (tmp_path / ".codex/config.toml").exists()
+    assert not (tmp_path / ".cursor").exists() and not (tmp_path / ".config/Claude").exists()
+
+
+def test_broken_json_is_left_alone(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor/mcp.json").write_text("{not json")
+    said = []
+    installer.install("cursor", say=said.append)
+    assert (tmp_path / ".cursor/mcp.json").read_text() == "{not json"
+    assert "isn't valid JSON" in said[0]
+
+
+def test_dry_run_shows_only_this_servers_entry(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor/mcp.json").write_text('{"mcpServers": {"other": {"command": "secret-path"}}, "account": "id-123"}')
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex/config.toml").write_text('token_note = "private"\n')
+    said = []
+    installer.install("cursor", dry_run=True, say=said.append)
+    installer.install("codex", dry_run=True, say=said.append)
+    shown = "\n".join(said)
+    assert installer.SERVER_KEY in shown
+    assert "secret-path" not in shown and "id-123" not in shown and "private" not in shown
+    assert (tmp_path / ".cursor/mcp.json").read_text().count("other") == 1  # nothing written
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        f"[mcp_servers.{installer.SERVER_KEY}] # added by hand",
+        f'[ mcp_servers . "{installer.SERVER_KEY}" ]',
+        f"[mcp_servers.'{installer.SERVER_KEY}']",
+    ],
+)
+def test_codex_recognises_its_table_however_it_is_spelled(tmp_path, monkeypatch, header):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    config.write_text(f'{header}\ncommand = "old"\n\n[mcp_servers.other]\ncommand = "keep"\n')
+    assert installer.install("codex", say=lambda _: None)
+    text = config.read_text()
+    assert '"old"' not in text and '"keep"' in text
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1  # one table, not a duplicate
+
+
+def test_codex_leaves_other_spellings_alone_and_says_so(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = f'[mcp_servers]\n"{installer.SERVER_KEY}" = ' + '{ command = "old" }\n'
+    config.write_text(original)
+    said = []
+    assert not installer.install("codex", say=said.append)
+    assert config.read_text() == original
+    assert "doesn't edit" in said[0]
+
+
+def test_codex_never_writes_invalid_toml(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = "this is = = not toml\n"
+    config.write_text(original)
+    said = []
+    assert not installer.install("codex", say=said.append)
+    assert config.read_text() == original and "Nothing was written" in said[0]
+
+
+def test_a_failed_claude_code_add_is_reported_and_fails(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/bin/claude" if name == "claude" else None)
+
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "error: unknown option '-s'"
+
+    said = []
+    assert not installer.install("claude-code", say=said.append, run=lambda argv, **kw: Failed())
+    assert "failed" in said[0] and "unknown option" in said[0]
+    assert len(said) == 1  # no "restart the client" line after a failure
+
+
+def test_codex_leaves_a_root_inline_definition_alone(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = f'mcp_servers = ' + '{ "' + installer.SERVER_KEY + '" = { command = "old" } }\n'
+    config.write_text(original)
+    assert not installer.install("codex", say=lambda _: None)
+    assert config.read_text() == original
+
+
+@pytest.mark.parametrize(("code", "stderr", "ok"), [(1, "Permission denied: ~/.claude.json", False), (1, "No MCP server found with name", True)])
+def test_claude_code_remove_reports_real_failures(tmp_path, monkeypatch, code, stderr, ok):
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/bin/claude" if name == "claude" else None)
+
+    class Done:
+        returncode = code
+        stdout = ""
+
+    Done.stderr = stderr
+    said = []
+    assert installer.install("claude-code", remove=True, say=said.append, run=lambda argv, **kw: Done()) is ok
+    assert ("failed" in said[0]) is not ok
+
+
+@pytest.mark.parametrize("quote", ['"' * 3, "'" * 3])
+def test_codex_leaves_header_lookalikes_inside_multiline_strings_alone(tmp_path, monkeypatch, quote):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    note = f"[mcp_servers.{installer.SERVER_KEY}]\nthis is just text\n[other]"
+    original = f"notes = {quote}\n{note}\n{quote}\n\n[mcp_servers.other]\ncommand = \"keep\"\n"
+    config.write_text(original)
+    assert installer.install("codex", say=lambda _: None)
+    text = config.read_text()
+    assert text.startswith(original.rstrip())  # the string and the other table, untouched
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 2  # the text one + the real one
+    tomllib = pytest.importorskip("tomllib") if installer.sys.version_info >= (3, 11) else pytest.importorskip("tomli")
+    parsed = tomllib.loads(text)
+    assert parsed["notes"].strip() == note and installer.SERVER_KEY in parsed["mcp_servers"]
+
+
+def test_codex_env_keys_are_quoted(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    installer.install("codex", writes=True, say=lambda _: None)
+    assert f'"{installer.WRITES_VAR}" = "true"' in (tmp_path / ".codex/config.toml").read_text()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "note = '" + '"' * 3 + " in a literal string'",
+        'note = "' + "'" * 3 + ' in a basic string"',
+        'note = "escaped \\" quote, then ' + "'" * 3 + ' inside"',
+        "note = 1  # a comment with " + '"' * 3,
+    ],
+)
+def test_quotes_inside_ordinary_strings_dont_open_a_multiline_string(tmp_path, monkeypatch, line):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    config.write_text(f'{line}\n\n[mcp_servers.{installer.SERVER_KEY}]\ncommand = "old"\n')
+    assert installer.install("codex", say=lambda _: None)
+    text = config.read_text()
+    assert text.count(f"[mcp_servers.{installer.SERVER_KEY}]") == 1 and '"old"' not in text
+    assert text.startswith(line)
+
+
+def test_multiline_state_unit_cases():
+    q3, s3 = '"' * 3, "'" * 3
+    assert installer._multiline_state(f"a = {q3}", "") == q3
+    assert installer._multiline_state(f"still text {s3} here", q3) == q3  # the other kind doesn't close it
+    assert installer._multiline_state(f"end {q3}", q3) == ""
+    assert installer._multiline_state(f"a = {q3}one line{q3}", "") == ""
+    assert installer._multiline_state(f"x \\{q3} still open", q3) == q3  # escaped quote
+    assert installer._multiline_state(f"a = {s3}raw \\{s3}", "") == ""  # no escapes in literal strings
+
+
+def test_a_dotted_definition_opening_a_multiline_string_is_still_recognised(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    config = tmp_path / ".codex/config.toml"
+    config.parent.mkdir()
+    original = f'mcp_servers.{installer.SERVER_KEY}.command = ' + '"' * 3 + '\nold\n' + '"' * 3 + '\n'
+    config.write_text(original)
+    assert not installer.install("codex", remove=True, say=lambda _: None)
+    assert config.read_text() == original

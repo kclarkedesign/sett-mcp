@@ -1,0 +1,10 @@
+"""ASGI entry point for hosting platforms (Vercel, containers).
+
+    uvicorn {{ package_name }}.asgi:app
+
+Refuses to start without sign-in configured; see `create_app` in server.py.
+"""
+
+from .server import create_app
+
+app = create_app()

@@ -1,0 +1,81 @@
+# Troubleshooting {{ project_name }}
+
+The problems people actually hit, each with its fix. Commands are for this project, so they can be copied as they are. Windows commands are for PowerShell.
+
+## The everyday commands
+
+```bash
+uv sync                                              # install or refresh this project
+uv run --extra dev pytest                            # run the tests
+uv run {{ project_slug }} install claude-desktop             # add to a client (or cursor, claude-code, codex, all)
+uv run {{ project_slug }} install claude-desktop --writes    # the same, with write tools on
+uv run {{ project_slug }} install claude-desktop --remove    # take it out again
+uv run {{ project_slug }} install all --dry-run              # show what would change, change nothing
+uv run {{ project_slug }}                                    # run the server by hand (it waits silently for a client; Ctrl+C to stop)
+```
+
+Once it's deployed (`docs/remote.md`):
+
+```bash
+uv run {{ project_slug }} deploy vercel --auth supabase --create-supabase-project --writes   # first deploy
+uv run {{ project_slug }} deploy vercel --auth supabase --writes                             # every later deploy
+uv run {{ project_slug }} users add ada@example.com bob@example.com --writer                 # let people sign in (spaces or commas)
+uv run {{ project_slug }} users grant bob@example.com                                        # make a writer
+uv run {{ project_slug }} users revoke bob@example.com                                       # back to reader
+uv run {{ project_slug }} users list
+```
+
+## Connecting a client
+
+| You see | Why | Fix |
+|---|---|---|
+| The server doesn't show up in Claude Desktop | Claude Desktop only reads its config at startup, and closing the window doesn't quit it | Quit it fully: Windows, right-click the tray icon (bottom right, maybe behind the ^ arrow) and choose Quit; macOS, Claude > Quit Claude. Then reopen it |
+| Still not there after a full quit | Newer Windows installs keep the config outside `%APPDATA%` | `install claude-desktop` updates every config it finds; run it again and check the paths it prints. They're also listed under "Where the configs live" below |
+| Codex or another client says the server "failed to start" or timed out | The first launch was still installing the project | Run `uv sync` once in this folder, then start the client again |
+| The client calls an older server with the same tools | An earlier test server is still registered, often under another name | Name this server in the request ("using {{ project_slug }}"), or remove the old entry from the client |
+| `uv run {{ project_slug }}` prints "Registered tools" and then nothing | That's normal: over stdio the server waits for a client to talk to it | Press Ctrl+C. Clients start it for you; you don't need to keep it running |
+
+## Writes and confirmations
+
+| You see | Why | Fix |
+|---|---|---|
+| The write tools (create, update, delete) aren't there | Writes are off by default, so those tools aren't registered | `uv run {{ project_slug }} install <client> --writes`, then restart the client |
+| "Writes are disabled" in the server's log when you run it by hand | `{{ env_prefix }}_ENABLE_WRITES` isn't set in your terminal | Expected. The client passes it from its config when it starts the server |
+| An update runs without asking, but delete asks | The default policy (`confirm: destructive`) only asks before destructive tools | Set `confirm: all_writes` in your policy to be asked before every write |
+| "...was not run: it needs the user's confirmation, and this connection can't carry a confirmation prompt" | The client can't show the prompt, so Sett refuses instead of guessing | Use a client that shows prompts (see [Sett's client support table](https://github.com/kclarkedesign/sett-mcp#client-support)). In Claude Desktop, local servers can't show them but remote ones can: deploy it (`docs/remote.md`) |
+| "...the confirmation was cancelled" | The prompt was dismissed, or the client couldn't show it | Try again and answer the prompt |
+| "...the user declined" | Someone chose Deny or Decline | Nothing to fix: the tool didn't run |
+| A write passing `[masked]` is refused | Masked values are placeholders, so writing one back would overwrite real data | Ask for the change with the real value |
+
+## Deploying (`deploy vercel --auth supabase`)
+
+| You see | Why | Fix |
+|---|---|---|
+| PowerShell: "vercel.ps1 cannot be loaded because running scripts is disabled" | Windows blocks the launcher npm installed | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or type `vercel.cmd`. The deploy itself isn't affected |
+| The deploy waits on a step with no output | The Vercel CLI asked a question (older CLIs) | Answer it in the terminal; the deploy carries on |
+| "The server ... didn't come up (HTTP 404)" | Vercel didn't run the app as Python | Check `vercel.json` (`"framework": "python"`) and `asgi.py` are in this folder |
+| "didn't come up" with another error | A setting is missing or wrong | `vercel logs --deployment <your-project>.vercel.app` names it |
+| "Which Supabase organization?" | You belong to more than one | Add `--supabase-org` with the name in quotes (`--supabase-org "My Org"`) or the slug from the list. Choose a free organization unless you mean to pay: a project in a paid one adds to its bill |
+| Creating the project is refused, mentioning the free plan | The free plan allows two active projects across the organizations you own or administer | Pause or delete one in the Supabase dashboard, or use `--supabase-project <ref>` with an existing project |
+| "isn't ready after 15 minutes" | The new project is still starting | Run the same deploy again later: the project was saved, so it carries on instead of creating another |
+| It asks for a Supabase access token although you ran `supabase login` | The deploy couldn't read the CLI's saved sign-in (a different profile, or a keyring it can't open) | Set `SUPABASE_ACCESS_TOKEN`, or paste a token from Account, Access Tokens |
+| "still signs tokens with a shared secret" | The Supabase project uses the legacy JWT secret | Supabase dashboard, Authentication, JWT Keys, "Rotate keys"; then deploy again |
+| "This Supabase project's Site URL is ..." | The project already serves another site | Use a Supabase project just for this server, or `--yes` if that address was this server's |
+| No rows in the `sett_audit` table, "403" in Vercel's logs | Supabase's Data API is off, or the table predates Sett 0.3.0 | Turn on the Data API (Project Settings, Data API), and run `grant insert on table public.sett_audit to service_role;` in the SQL editor |
+| Signing in says "Signups not allowed" | The email wasn't added, or GitHub's email differs from the one added | `uv run {{ project_slug }} users add <email>` with the address the person signs in with (several at once: separate them with spaces or commas) |
+| The connector says it can't connect, or the consent page never opens | The address is missing `/mcp`, or a popup blocker stopped the sign-in window | Use the full `https://<your-project>.vercel.app/mcp` and allow popups for claude.ai |
+| The sign-in email never arrives | Supabase's built-in sender only mails members of your Supabase organization, a few times an hour | Add your own SMTP server (Supabase, Authentication, Emails), or use GitHub sign-in |
+| A user can read but not write | They don't have the writer role, or their sign-in predates it | `uv run {{ project_slug }} users grant <email>`; it applies within an hour, or at once if they sign in again |
+| Everything stopped working after a week | Free Supabase projects pause when idle | Restore the project in the Supabase dashboard |
+
+## Where the configs live
+
+| Client | Config | Written by |
+|---|---|---|
+| Claude Desktop, Windows | `%APPDATA%\Claude\claude_desktop_config.json`, or for newer installs `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json` | `install claude-desktop` |
+| Claude Desktop, macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` | `install claude-desktop` |
+| Cursor | `~/.cursor/mcp.json` (Windows: `%USERPROFILE%\.cursor\mcp.json`) | `install cursor` |
+| Claude Code | Managed by Claude Code; `claude mcp list` shows it | `install claude-code` (runs `claude mcp add`) |
+| Codex | `~/.codex/config.toml` (Windows: `%USERPROFILE%\.codex\config.toml`) | `install codex` |
+
+Each install backs up the file it changes as `<name>.bak` beside it, so a change can be undone by copying the backup back.

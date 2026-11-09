@@ -1,0 +1,12 @@
+# Runs the server over stdio, which is how MCP directories such as Glama start it.
+# Writes stay off unless the container is started with -e {{ env_prefix }}_ENABLE_WRITES=true.
+#   docker build -t {{ project_slug }} .
+#   docker run --rm -i {{ project_slug }}
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+WORKDIR /app
+COPY . .
+RUN uv sync --no-dev
+
+CMD ["uv", "run", "--no-sync", "{{ project_slug }}"]

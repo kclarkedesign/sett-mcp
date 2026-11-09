@@ -1,0 +1,647 @@
+"""`deploy vercel --auth supabase` and `users`, against stand-ins for Vercel and Supabase.
+
+The stand-ins record every command and request, so these tests check what the deploy
+would change, in what order, and that it stops before changing anything it shouldn't.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from {{ package_name }} import deploy
+from {{ package_name }}.deploy import DeployError, DeployOptions, Supabase, Vercel
+
+PREFIX = "{{ env_prefix }}"
+REF = "abcdefghijklmnopqrst"
+HOST = "my-server.vercel.app"
+RESOURCE = f"https://{HOST}/mcp"
+
+
+class FakeSupabase:
+    """Answers the Management API, the Auth admin API, the JWKS and the deployed server."""
+
+    def __init__(self, *, keys=None, signing_keys=True, site_url="http://localhost:3000", users=()):
+        self.calls = []
+        self.keys = keys if keys is not None else [
+            {"type": "publishable", "api_key": "sb_publishable_x", "name": "default"},
+            {"type": "secret", "api_key": "sb_secret_y", "name": "default"},
+        ]
+        self.signing = [{"kty": "EC", "kid": "k"}] if signing_keys else []
+        self.auth = {"site_url": site_url, "external_github_enabled": False}
+        self.users = {u.lower(): {} for u in users}
+        self.server_status = 401
+
+    def __call__(self, method, url, headers, body):
+        data = json.loads(body) if body else None
+        self.calls.append((method, url, dict(headers), data))
+        api = f"https://api.supabase.com/v1/projects/{REF}"
+        if url == api:
+            return 200, json.dumps({"name": "sett-demo", "status": "ACTIVE_HEALTHY"}).encode()
+        if url == f"{api}/api-keys?reveal=true" and method == "GET":
+            return 200, json.dumps(self.keys).encode()
+        if url == f"{api}/api-keys?reveal=true" and method == "POST":
+            key = {"type": "secret", "api_key": "sb_secret_new", "name": data["name"]}
+            self.keys.append(key)
+            return 201, json.dumps(key).encode()
+        if url == f"{api}/config/auth":
+            if method == "PATCH":
+                self.auth |= data
+            return 200, json.dumps(self.auth).encode()
+        if url == f"{api}/database/query":
+            return 201, b"[]"
+        if url == f"https://{REF}.supabase.co/auth/v1/.well-known/jwks.json":
+            return 200, json.dumps({"keys": self.signing}).encode()
+        admin = f"https://{REF}.supabase.co/auth/v1/admin/users"
+        if url == admin and method == "POST":
+            if data["email"].lower() in self.users:
+                return 422, b'{"code":"email_exists"}'
+            self.users[data["email"].lower()] = data["app_metadata"]
+            return 200, b"{}"
+        if url.startswith(admin + "?") and method == "GET":
+            users = [{"id": f"id-{e}", "email": e, "app_metadata": m} for e, m in self.users.items()]
+            return 200, json.dumps({"users": users}).encode()
+        if url.startswith(admin + "/id-") and method == "PUT":
+            email = url.removeprefix(admin + "/id-")
+            for key, value in data["app_metadata"].items():
+                if value is None:
+                    self.users[email].pop(key, None)
+                else:
+                    self.users[email][key] = value
+            return 200, b"{}"
+        if url == f"https://{HOST}/.well-known/oauth-protected-resource/mcp":
+            return 200, json.dumps({"resource": RESOURCE}).encode()
+        if url.endswith("/.well-known/oauth-protected-resource/mcp"):
+            return 421, b"Misdirected Request"  # the server answers only on its production host
+        if url == f"https://{HOST}/mcp":
+            return self.server_status, b""
+        if url == f"https://{HOST}/oauth/consent":
+            return 200, b"<html>"
+        return 404, b"not found"
+
+    def sent(self, method, suffix):
+        return [c for c in self.calls if c[0] == method and c[1].endswith(suffix)]
+
+
+class FakeVercel:
+    def __init__(self, existing_env=()):
+        self.commands = []
+        self.existing_env = set(existing_env)
+        self.env = {}
+
+    def __call__(self, argv, stdin):
+        self.commands.append(argv)
+        args = argv[1 : argv.index("--cwd")]
+        if args[0] == "whoami":
+            return 0, "kirk\n", ""
+        if args[:2] == ["teams", "ls"]:
+            teams = [{"slug": "other-team", "current": False}, {"slug": "kirk-projects", "current": True}]
+            return 0, json.dumps({"teams": teams}), ""
+        if args[:2] == ["env", "ls"]:
+            return 0, "\n".join(sorted(self.existing_env)), ""
+        if args[:2] == ["env", "add"]:
+            self.env[args[2]] = stdin
+            return 0, "", ""
+        if args[0] == "deploy":
+            return 0, "https://my-server-abc123-kirk.vercel.app\n", "Building...\n"
+        if args[0] == "inspect":
+            aliases = [HOST, "my-server-kirk.vercel.app", "my-server-git-main-kirk.vercel.app"]
+            return 0, json.dumps({"aliases": aliases}), ""
+        return 0, "", ""
+
+    def ran(self, *prefix):
+        return [c for c in self.commands if c[1 : 1 + len(prefix)] == list(prefix)]
+
+
+@pytest.fixture
+def run(tmp_path):
+    def run(supabase=None, vercel=None, **options):
+        supabase = supabase or FakeSupabase()
+        vercel = vercel or FakeVercel()
+        opts = DeployOptions(
+            vercel_project="my-server", env_prefix=PREFIX, cwd=tmp_path, say=lambda _: None, sleep=lambda _: None, **options
+        )
+        url = deploy.deploy(opts, Supabase("token", REF, supabase), Vercel(tmp_path, run=vercel), request=supabase)
+        return url, supabase, vercel
+
+    return run
+
+
+def test_deploy_sets_everything_up(run, tmp_path):
+    url, supabase, vercel = run()
+    assert url == RESOURCE
+
+    assert vercel.env[f"{PREFIX}_SUPABASE_URL"] == f"https://{REF}.supabase.co"
+    assert vercel.env[f"{PREFIX}_SUPABASE_PUBLISHABLE_KEY"] == "sb_publishable_x"
+    assert vercel.env[f"{PREFIX}_SUPABASE_SECRET_KEY"] == "sb_secret_y"
+    assert len(vercel.env[f"{PREFIX}_REQUEST_STATE_KEY"]) >= 32
+    assert vercel.env[f"{PREFIX}_ENABLE_WRITES"] == "false"  # stated on every deploy
+
+    queries = [c[3]["query"] for c in supabase.sent("POST", "/database/query")]
+    assert "create table if not exists public.sett_audit" in queries[0]
+    assert "grant insert on table public.sett_audit to service_role" in queries[0]  # newer projects need it
+    assert f"resource text := '{RESOURCE}';" in queries[1]
+
+    auth = supabase.sent("PATCH", "/config/auth")[0][3]
+    assert auth == {
+        "site_url": f"https://{HOST}",
+        "disable_signup": True,
+        "oauth_server_enabled": True,
+        "oauth_server_allow_dynamic_registration": True,
+        "oauth_server_authorization_path": "/oauth/consent",
+        "hook_custom_access_token_enabled": True,
+        "hook_custom_access_token_uri": "pg-functions://postgres/public/sett_access_token_hook",
+    }
+
+    state = json.loads((tmp_path / deploy.STATE_FILE).read_text())
+    assert state == {
+        "supabase_project": REF,
+        "vercel_project": "my-server",
+        "vercel_scope": "kirk-projects",
+        "url": f"https://{HOST}",
+    }
+    assert "sb_secret" not in (tmp_path / deploy.STATE_FILE).read_text()
+
+
+def test_steps_run_in_a_safe_order(run):
+    _, supabase, vercel = run()
+    assert vercel.ran("link") and vercel.ran("deploy")
+    assert vercel.commands.index(vercel.ran("env", "add")[-1]) < vercel.commands.index(vercel.ran("deploy")[0])
+    # The hook exists before Supabase is told to call it.
+    sql_at = next(i for i, c in enumerate(supabase.calls) if c[1].endswith("/database/query"))
+    patch_at = next(i for i, c in enumerate(supabase.calls) if c[0] == "PATCH")
+    assert sql_at < patch_at
+
+
+def test_linking_names_the_current_team_so_vercel_doesnt_ask(run, tmp_path):
+    _, _, vercel = run()
+    (link,) = vercel.ran("link")
+    assert link[link.index("--scope") + 1] == "kirk-projects"
+    assert json.loads((tmp_path / deploy.STATE_FILE).read_text())["vercel_scope"] == "kirk-projects"
+
+
+def test_an_already_linked_folder_is_not_linked_again(run, tmp_path):
+    (tmp_path / ".vercel").mkdir()
+    (tmp_path / ".vercel" / "project.json").write_text('{"projectId": "p", "orgId": "o", "projectName": "my-server"}')
+    _, _, vercel = run()
+    assert not vercel.ran("link") and not vercel.ran("project", "add")
+
+
+def test_naming_a_team_relinks_even_when_the_folder_is_linked(run, tmp_path):
+    (tmp_path / ".vercel").mkdir()
+    (tmp_path / ".vercel" / "project.json").write_text('{"projectId": "p", "orgId": "o", "projectName": "my-server"}')
+    supabase, vercel = FakeSupabase(), FakeVercel()
+    opts = DeployOptions(
+        vercel_project="my-server", env_prefix=PREFIX, cwd=tmp_path, team_chosen=True,
+        say=lambda _: None, sleep=lambda _: None,
+    )
+    deploy.deploy(opts, Supabase("token", REF, supabase), Vercel(tmp_path, scope="acme-team", run=vercel), request=supabase)
+    (link,) = vercel.ran("link")
+    assert link[link.index("--scope") + 1] == "acme-team"
+    assert not vercel.ran("teams", "ls")  # the named team is used as is
+
+
+def test_request_state_key_is_kept_across_deploys(run):
+    _, _, vercel = run(vercel=FakeVercel(existing_env={f"{PREFIX}_REQUEST_STATE_KEY"}))
+    assert f"{PREFIX}_REQUEST_STATE_KEY" not in vercel.env
+
+
+def test_a_deploy_without_writes_closes_the_write_gate(run):
+    _, _, vercel = run(vercel=FakeVercel(existing_env={f"{PREFIX}_ENABLE_WRITES"}))
+    assert vercel.env[f"{PREFIX}_ENABLE_WRITES"] == "false"
+
+
+def test_a_failed_env_lookup_stops_the_deploy(run):
+    class Flaky(FakeVercel):
+        def __call__(self, argv, stdin):
+            if argv[1:3] == ["env", "ls"]:
+                self.commands.append(argv)
+                return 1, "", "temporary API failure"
+            return super().__call__(argv, stdin)
+
+    vercel = Flaky(existing_env={f"{PREFIX}_ENABLE_WRITES", f"{PREFIX}_REQUEST_STATE_KEY"})
+    with pytest.raises(DeployError, match="env ls"):
+        run(vercel=vercel)
+    assert not vercel.env and not vercel.ran("deploy")  # nothing replaced, nothing deployed
+
+
+def test_unreachable_hosts_are_retried_and_others_tried(run):
+    class Unreachable(FakeSupabase):
+        def __init__(self):
+            super().__init__()
+            self.failures = 2
+
+        def __call__(self, method, url, headers, body):
+            if "oauth-protected-resource" in url and url.startswith("https://new.example"):
+                self.calls.append((method, url, dict(headers), None))
+                raise DeployError("Couldn't reach new.example: DNS not ready")
+            if "oauth-protected-resource" in url and self.failures:
+                self.failures -= 1
+                self.calls.append((method, url, dict(headers), None))
+                raise DeployError(f"Couldn't reach {HOST}: connection reset")
+            return super().__call__(method, url, headers, body)
+
+    class TwoDomains(FakeVercel):
+        def __call__(self, argv, stdin):
+            if argv[1] == "inspect":
+                self.commands.append(argv)
+                return 0, json.dumps({"aliases": ["new.example", HOST]}), ""
+            return super().__call__(argv, stdin)
+
+    url, supabase, _ = run(supabase=Unreachable(), vercel=TwoDomains())
+    assert url == RESOURCE
+
+
+def test_legacy_service_role_keys_are_sent_as_bearer_to_the_admin_api():
+    legacy = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig"
+    supabase = FakeSupabase(keys=[{"type": "legacy", "name": "service_role", "api_key": legacy}])
+    deploy.add_user(Supabase("token", REF, supabase), "ada@example.org", writer=False, say=lambda _: None)
+    headers = supabase.sent("POST", "/auth/v1/admin/users")[0][2]
+    assert headers["apikey"] == legacy and headers["Authorization"] == f"Bearer {legacy}"
+
+
+def test_writes_and_github_only_when_asked(run):
+    _, supabase, vercel = run(enable_writes=True, github_client_id="gh-id", github_secret="gh-secret")
+    assert vercel.env[f"{PREFIX}_ENABLE_WRITES"] == "true"
+    auth = supabase.sent("PATCH", "/config/auth")[0][3]
+    assert auth["external_github_enabled"] is True
+    assert auth["external_github_client_id"] == "gh-id"
+
+
+def test_secret_key_is_created_when_the_project_has_none(run):
+    supabase = FakeSupabase(keys=[{"type": "publishable", "api_key": "sb_publishable_x"}])
+    _, supabase, vercel = run(supabase=supabase)
+    assert supabase.sent("POST", "/api-keys?reveal=true")[0][3] == {
+        "type": "secret",
+        "name": "sett_server",
+        "secret_jwt_template": {"role": "service_role"},
+    }
+    assert vercel.env[f"{PREFIX}_SUPABASE_SECRET_KEY"] == "sb_secret_new"
+
+
+def test_shared_secret_projects_stop_before_anything_changes(run):
+    supabase, vercel = FakeSupabase(signing_keys=False), FakeVercel()
+    with pytest.raises(DeployError, match="Rotate keys"):
+        run(supabase=supabase, vercel=vercel)
+    assert not vercel.ran("link") and not supabase.sent("PATCH", "/config/auth")
+
+
+def test_a_project_used_by_another_site_is_not_taken_over(run):
+    supabase, vercel = FakeSupabase(site_url="https://shop.example.com"), FakeVercel()
+    with pytest.raises(DeployError, match="Site URL"):
+        run(supabase=supabase, vercel=vercel)
+    assert not supabase.sent("PATCH", "/config/auth") and not supabase.sent("POST", "/database/query")
+    # Stopped before reading keys or touching Vercel, so no secret left Supabase.
+    assert not supabase.sent("GET", "/api-keys?reveal=true")
+    assert not vercel.ran("link") and not vercel.ran("env", "add")
+    run(supabase=FakeSupabase(site_url="https://shop.example.com"), yes=True)
+
+
+def test_an_open_server_is_not_reported_as_done(run, tmp_path):
+    supabase = FakeSupabase()
+    supabase.server_status = 200
+    with pytest.raises(DeployError, match="401"):
+        run(supabase=supabase)
+    assert not (tmp_path / deploy.STATE_FILE).exists()
+
+
+def test_production_hosts_are_tried_custom_domains_first():
+    aliases = ["app-abc123-team.vercel.app", "app-git-main-team.vercel.app", "app.vercel.app"]
+    assert deploy.production_hosts(aliases, "app") == ["app.vercel.app", "app-abc123-team.vercel.app"]
+    assert deploy.production_hosts([*aliases, "mcp.example.com"], "app")[0] == "mcp.example.com"
+    assert deploy.production_hosts([], "app") == ["app.vercel.app"]
+
+
+def test_the_host_that_answers_is_used_when_several_custom_domains_exist(run):
+    class TwoDomains(FakeVercel):
+        def __call__(self, argv, stdin):
+            if argv[1] == "inspect":
+                self.commands.append(argv)
+                return 0, json.dumps({"aliases": ["a.example", HOST]}), ""
+            return super().__call__(argv, stdin)
+
+    url, supabase, _ = run(vercel=TwoDomains())
+    assert url == RESOURCE  # a.example answered 421, so the production host was used
+
+
+def test_a_site_url_from_an_earlier_deploy_is_ours(run, tmp_path):
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server", "url": "https://old.example"})
+    _, supabase, _ = run(supabase=FakeSupabase(site_url="https://old.example"))
+    assert supabase.sent("PATCH", "/config/auth")[0][3]["site_url"] == f"https://{HOST}"
+
+
+def test_hook_sql_refuses_odd_addresses():
+    with pytest.raises(DeployError):
+        deploy.hook_sql("https://evil.example/mcp';drop table x;--")
+    with pytest.raises(DeployError):
+        deploy.hook_sql("https://ok.example/other")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [REF, f"https://{REF}.supabase.co", f"https://supabase.com/dashboard/project/{REF}/settings/api"],
+)
+def test_project_ref_accepts_urls(value):
+    assert deploy.project_ref(value) == REF
+
+
+def test_users_add_grant_revoke_list():
+    supabase = FakeSupabase()
+    api = Supabase("token", REF, supabase)
+    said = []
+    deploy.add_user(api, "ada@example.org", writer=True, say=said.append)
+    assert supabase.users["ada@example.org"] == {"sett_role": "writer"}
+    created = supabase.sent("POST", "/auth/v1/admin/users")[0]
+    assert created[2]["apikey"] == "sb_secret_y" and "Authorization" not in created[2]
+
+    deploy.set_writer(api, "Ada@Example.org", False, say=said.append)  # emails match without case
+    assert supabase.users["ada@example.org"] == {}
+    assert supabase.sent("PUT", "/admin/users/id-ada@example.org")[0][3] == {"app_metadata": {"sett_role": None}}
+    deploy.set_writer(api, "ada@example.org", True, say=said.append)
+    assert supabase.users["ada@example.org"] == {"sett_role": "writer"}
+    assert not supabase.sent("POST", "/database/query")  # roles never go through SQL
+
+    deploy.list_users(api, say=said.append)
+    assert said[-1].startswith("ada@example.org  writer")
+
+    with pytest.raises(DeployError, match="Add them first"):
+        deploy.set_writer(api, "nobody@example.org", True, say=said.append)
+
+
+def test_adding_an_existing_user_as_writer_grants_the_role():
+    supabase = FakeSupabase(users=["ada@example.org"])
+    deploy.add_user(Supabase("token", REF, supabase), "ada@example.org", writer=True, say=lambda _: None)
+    assert supabase.users["ada@example.org"] == {"sett_role": "writer"}
+
+
+def test_bad_token_says_so():
+    def refuse(method, url, headers, body):
+        return 401, b'{"message":"Unauthorized"}'
+
+    with pytest.raises(DeployError, match="access token"):
+        Supabase("bad", REF, refuse).project()
+
+
+def test_vercel_runs_the_root_entry_point_as_python():
+    root = Path(__file__).resolve().parents[1]
+    assert "from {{ package_name }}.asgi import app" in (root / "asgi.py").read_text()
+    # Without this, a project created by `vercel project add` is "Other" and serves only static files.
+    assert json.loads((root / "vercel.json").read_text())["framework"] == "python"
+
+
+# --- creating the Supabase project, and reusing `supabase login` --------------------------
+
+TOKEN = "sbp_" + "a" * 40
+
+
+class FakeAccount(FakeSupabase):
+    """Adds organizations, project creation and a project that takes a few polls to start."""
+
+    def __init__(self, orgs=None, polls_until_healthy=2, **kw):
+        super().__init__(**kw)
+        self.orgs = orgs if orgs is not None else [{"id": "1", "slug": "kirk-org", "name": "Kirk"}]
+        self.polls = polls_until_healthy
+        self.create_status = 201
+
+    def __call__(self, method, url, headers, body):
+        data = json.loads(body) if body else None
+        if url == "https://api.supabase.com/v1/organizations":
+            self.calls.append((method, url, dict(headers), data))
+            return 200, json.dumps(self.orgs).encode()
+        if url == "https://api.supabase.com/v1/projects" and method == "POST":
+            self.calls.append((method, url, dict(headers), data))
+            if self.create_status >= 400:
+                return self.create_status, b'{"message":"free project limit reached"}'
+            return 201, json.dumps({"ref": REF, "status": "COMING_UP"}).encode()
+        if url.endswith(f"/v1/projects/{REF}/health?services=auth,db,rest"):
+            self.calls.append((method, url, dict(headers), data))
+            self.polls -= 1
+            status = "ACTIVE_HEALTHY" if self.polls <= 0 else "COMING_UP"
+            return 200, json.dumps([{"name": n, "status": status} for n in ("auth", "db", "rest")]).encode()
+        return super().__call__(method, url, headers, body)
+
+
+def create(account, **kw):
+    clock = iter(range(0, 10_000, 5))
+    return deploy.create_supabase_project(
+        deploy.SupabaseAccount(TOKEN, account), "my-server", say=lambda _: None, sleep=lambda _: None,
+        clock=lambda: next(clock), **kw,
+    )
+
+
+def test_creates_a_project_and_waits_until_it_is_healthy():
+    account = FakeAccount(polls_until_healthy=3)
+    said = []
+    clock = iter(range(0, 10_000, 5))
+    ref = deploy.create_supabase_project(
+        deploy.SupabaseAccount(TOKEN, account), "my-server", say=said.append, sleep=lambda _: None, clock=lambda: next(clock)
+    )
+    assert ref == REF
+    (call,) = account.sent("POST", "/v1/projects")
+    body = call[3]
+    assert body["db_pass"] not in "\n".join(said)  # never printed
+    assert body["name"] == "my-server" and body["organization_slug"] == "kirk-org"
+    assert body["region_selection"] == {"type": "smartGroup", "code": "americas"}
+    assert len(body["db_pass"]) == 24 and body["db_pass"].isalnum()
+    assert len(account.sent("GET", "/health?services=auth,db,rest")) == 3
+
+
+def test_a_specific_region_is_sent_as_specific():
+    account = FakeAccount()
+    create(account, region="eu-central-1")
+    assert account.sent("POST", "/v1/projects")[0][3]["region_selection"] == {"type": "specific", "code": "eu-central-1"}
+
+
+def test_several_organizations_need_a_choice():
+    orgs = [{"slug": "a-org", "name": "Work"}, {"slug": "b-org", "name": "Personal"}]
+    with pytest.raises(DeployError, match="a-org \\(Work\\), b-org \\(Personal\\)") as refused:
+        create(FakeAccount(orgs=orgs))
+    assert '--supabase-org "Work"' in str(refused.value) and "bill" in str(refused.value)
+    account = FakeAccount(orgs=orgs)
+    create(account, organization="Personal")
+    assert account.sent("POST", "/v1/projects")[0][3]["organization_slug"] == "b-org"
+
+
+def test_a_refused_create_explains_the_free_plan_limit():
+    account = FakeAccount()
+    account.create_status = 400
+    with pytest.raises(DeployError, match="two active projects"):
+        create(account)
+
+
+def test_a_project_that_never_starts_times_out_with_a_rerun_hint():
+    with pytest.raises(DeployError, match="Run the deploy again later"):
+        create(FakeAccount(polls_until_healthy=10_000))
+
+
+class NoPublishableKey(FakeSupabase):
+    def __call__(self, method, url, headers, body):
+        if method == "POST" and url.endswith("/api-keys?reveal=true") and json.loads(body)["type"] == "publishable":
+            self.calls.append((method, url, dict(headers), json.loads(body)))
+            return 201, json.dumps({"type": "publishable", "api_key": "sb_publishable_new"}).encode()
+        return super().__call__(method, url, headers, body)
+
+
+def test_a_missing_publishable_key_is_created(run):
+    supabase = NoPublishableKey(keys=[{"type": "secret", "api_key": "sb_secret_y"}])
+    _, _, vercel = run(supabase=supabase)
+    assert vercel.env[f"{PREFIX}_SUPABASE_PUBLISHABLE_KEY"] == "sb_publishable_new"
+    assert supabase.sent("POST", "/api-keys?reveal=true")[0][3] == {"type": "publishable", "name": "default"}
+
+
+def test_the_env_token_wins(monkeypatch):
+    called = []
+    token = deploy.access_token({"SUPABASE_ACCESS_TOKEN": " sbp_env "}, cli_login=lambda env: called.append(1), ask=lambda _: "x")
+    assert token == "sbp_env" and not called
+
+
+def test_the_supabase_cli_login_is_used_before_asking():
+    said = []
+    token = deploy.access_token({}, cli_login=lambda env: TOKEN, ask=lambda _: pytest.fail("asked"), say=said.append)
+    assert token == TOKEN and "supabase login" in said[0]
+
+
+def test_asks_when_there_is_no_login():
+    assert deploy.access_token({}, cli_login=lambda env: None, ask=lambda _: " pasted ") == "pasted"
+
+
+def test_reads_the_cli_token_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "linux")
+    monkeypatch.setattr(deploy.shutil, "which", lambda name: None)  # no secret-tool
+    (tmp_path / "access-token").write_text(TOKEN + "\n")
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}) == TOKEN
+
+
+def test_ignores_a_file_that_isnt_a_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "linux")
+    monkeypatch.setattr(deploy.shutil, "which", lambda name: None)
+    (tmp_path / "access-token").write_text("not a token")
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}) is None
+
+
+def test_reads_the_macos_keychain_with_the_profile_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "darwin")
+    monkeypatch.setattr(deploy, "_is_wsl", lambda: False)
+    (tmp_path / "profile").write_text("work\n")
+    asked = []
+
+    class Done:
+        returncode = 0
+        stdout = "go-keyring-base64:" + __import__("base64").b64encode(TOKEN.encode()).decode() + "\n"
+
+    def run(argv, **kw):
+        asked.append(argv)
+        return Done()
+
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}, run=run) == TOKEN
+    assert asked[0] == ["security", "find-generic-password", "-s", "Supabase CLI", "-a", "work", "-w"]
+
+
+def test_reads_windows_credential_manager(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "win32")
+    monkeypatch.setattr(deploy, "_is_wsl", lambda: False)
+    targets = []
+
+    def credential(target):
+        targets.append(target)
+        return TOKEN if target.endswith(":access-token") else None
+
+    monkeypatch.setattr(deploy, "_windows_credential", credential)
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}) == TOKEN
+    assert targets == ["Supabase CLI:supabase", "Supabase CLI:access-token"]
+
+
+def test_the_ref_is_handed_over_before_the_wait():
+    saved = []
+    with pytest.raises(DeployError, match="Run the deploy again later"):
+        create(FakeAccount(polls_until_healthy=10_000), on_created=saved.append)
+    assert saved == [REF]  # known before the wait timed out, so a rerun can resume
+
+
+def test_a_rerun_resumes_a_project_that_was_still_starting(tmp_path, monkeypatch):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server", "supabase_starting": True})
+    for name in ("pyproject.toml", "asgi.py", "vercel.json"):
+        (tmp_path / name).write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    waited, deployed = [], []
+    monkeypatch.setattr(deploy, "wait_until_ready", lambda supabase, **kw: waited.append(supabase.ref))
+    monkeypatch.setattr(deploy, "deploy", lambda options, supabase, vercel: deployed.append(supabase.ref))
+    monkeypatch.setattr(deploy, "create_supabase_project", lambda *a, **k: pytest.fail("created a second project"))
+    server.main(["deploy", "vercel", "--auth", "supabase"])
+    assert waited == [REF] and deployed == [REF]
+    assert "supabase_starting" not in deploy.load_state(tmp_path)
+
+
+def test_create_is_refused_once_a_project_was_saved(tmp_path, monkeypatch, capsys):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server"})
+    for name in ("pyproject.toml", "asgi.py", "vercel.json"):
+        (tmp_path / name).write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    with pytest.raises(SystemExit):
+        server.main(["deploy", "vercel", "--auth", "supabase", "--create-supabase-project"])
+    assert "already has Supabase project" in capsys.readouterr().err
+
+
+def test_users_commands_take_several_emails(tmp_path, monkeypatch, capsys):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    added = []
+
+    def add_user(supabase, email, writer):
+        if email == "bad@example.org":
+            raise DeployError("Couldn't add bad@example.org")
+        added.append((email, writer))
+
+    monkeypatch.setattr(deploy, "add_user", add_user)
+    with pytest.raises(SystemExit):
+        server.main(["users", "add", "ada@example.org,bob@example.org", "bad@example.org", "cy@example.org", "--writer"])
+    assert added == [("ada@example.org", True), ("bob@example.org", True), ("cy@example.org", True)]
+    assert "Not done for: bad@example.org" in capsys.readouterr().err
+
+
+def test_an_organization_name_shared_by_two_is_refused():
+    orgs = [{"slug": "a-org", "name": "Team"}, {"slug": "b-org", "name": "Team"}]
+    with pytest.raises(DeployError, match="a-org, b-org"):
+        create(FakeAccount(orgs=orgs), organization="Team")
+    account = FakeAccount(orgs=orgs)
+    create(account, organization="b-org")
+    assert account.sent("POST", "/v1/projects")[0][3]["organization_slug"] == "b-org"
+
+
+def test_a_refused_token_stops_the_wait_at_once():
+    class Refused(FakeAccount):
+        def __call__(self, method, url, headers, body):
+            if url.endswith(f"/v1/projects/{REF}") and method == "GET":
+                return 401, b'{"message":"Unauthorized"}'
+            return super().__call__(method, url, headers, body)
+
+    sleeps = []
+    with pytest.raises(DeployError, match="access token"):
+        deploy.wait_until_ready(Supabase(TOKEN, REF, Refused()), say=lambda _: None, sleep=sleeps.append, clock=lambda: 0)
+    assert sleeps == []
+
+
+def test_a_profile_file_is_resolved_to_its_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "darwin")
+    monkeypatch.setattr(deploy, "_is_wsl", lambda: False)
+    profile = tmp_path / "work.yaml"
+    profile.write_text("name: work-profile\napi_url: https://api.supabase.com\n")
+    asked = []
+
+    class Missing:
+        returncode = 1
+        stdout = ""
+
+    deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path), "SUPABASE_PROFILE": str(profile)}, run=lambda argv, **kw: asked.append(argv) or Missing())
+    assert asked[0][-2] == "work-profile"

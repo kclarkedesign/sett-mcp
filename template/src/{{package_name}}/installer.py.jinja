@@ -1,44 +1,355 @@
-"""Adds this server to Claude Desktop's config file (macOS, Windows, Linux)."""
+"""Adds this server to MCP clients: Claude Desktop, Cursor, Claude Code and Codex.
+
+    uv run {{ project_slug }} install claude-desktop            # read-only
+    uv run {{ project_slug }} install codex --writes             # with write tools
+    uv run {{ project_slug }} install all --writes               # every client found
+    uv run {{ project_slug }} install cursor --remove            # take it out again
+
+Each config file is backed up (`.bak`) before it changes. Writes stay off unless
+`--writes` is given, and `--writes` only sets `{{ env_prefix }}_ENABLE_WRITES=true` in
+that client's entry: the server's own rules (confirmations, masking) still apply.
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 SERVER_KEY = "{{ project_slug }}"
+WRITES_VAR = "{{ env_prefix }}_ENABLE_WRITES"
+CLIENTS = ("claude-desktop", "cursor", "claude-code", "codex")
+RESTART = {
+    "claude-desktop": "Fully quit Claude Desktop (tray icon or menu bar, then Quit) and reopen it.",
+    "cursor": "Restart Cursor, or reload its MCP servers in Settings.",
+    "claude-code": "Start a new Claude Code session.",
+    "codex": "Start a new Codex session.",
+}
+
+Say = Callable[[str], None]
+Run = Callable[..., Any]
 
 
-def config_path() -> Path:
+def _say(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def config_paths() -> list[Path]:
+    """Every Claude Desktop config location that exists, or the standard one if none do.
+
+    On Windows, recent and Microsoft Store builds keep their config outside %APPDATA%,
+    so each install found is updated.
+    """
     if sys.platform == "darwin":
-        return Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+        return [Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"]
     if sys.platform == "win32":
-        return Path(os.environ["APPDATA"]) / "Claude/claude_desktop_config.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "Claude/claude_desktop_config.json"
+        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        dirs = [
+            Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming")) / "Claude",
+            *sorted(local.glob("Claude-Data/claude_*")),
+            *sorted(local.glob("Packages/Claude_*/LocalCache/Roaming/Claude")),
+        ]
+        found = [d for d in dirs if d.is_dir()]
+        return [d / "claude_desktop_config.json" for d in found or dirs[:1]]
+    return [Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "Claude/claude_desktop_config.json"]
 
 
-def server_entry(use_uvx: bool) -> dict:
+def cursor_path() -> Path:
+    return Path.home() / ".cursor" / "mcp.json"
+
+
+def codex_path() -> Path:
+    return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
+
+
+def server_entry(use_uvx: bool, writes: bool = False) -> dict[str, Any]:
     if use_uvx:
         command, args = "uvx", ["{{ project_slug }}"]
     else:
-        # The interpreter running this command, so the entry keeps working from a venv.
+        # The interpreter running this command (this project's virtualenv), so the entry
+        # starts instantly and keeps working from any folder.
         command, args = sys.executable, ["-m", "{{ package_name }}"]
-    return {"command": command, "args": args, "env": {"{{ env_prefix }}_ENABLE_WRITES": "false"}}
+    return {"command": command, "args": args, "env": {WRITES_VAR: "true" if writes else "false"}}
 
 
-def install_claude_desktop(*, use_uvx: bool, dry_run: bool) -> None:
-    path = config_path()
-    config = json.loads(path.read_text()) if path.exists() else {}
-    config.setdefault("mcpServers", {})[SERVER_KEY] = server_entry(use_uvx)
-    text = json.dumps(config, indent=2)
+def detected(client: str) -> bool:
+    """Whether a client looks installed, for `install all`."""
+    if client == "claude-desktop":
+        return any(p.parent.is_dir() for p in config_paths())
+    if client == "cursor":
+        return cursor_path().parent.is_dir()
+    if client == "claude-code":
+        return shutil.which("claude") is not None
+    return codex_path().parent.is_dir() or shutil.which("codex") is not None
 
-    if dry_run:
-        print(text)
-        return
+
+def install(
+    client: str,
+    *,
+    writes: bool = False,
+    use_uvx: bool = False,
+    dry_run: bool = False,
+    remove: bool = False,
+    say: Say = _say,
+    run: Run = subprocess.run,
+) -> bool:
+    """Add (or with `remove`, take out) this server in one client's configuration.
+
+    Returns False when a client couldn't be changed; the message says why.
+    """
+    if client == "all":
+        found = [c for c in CLIENTS if detected(c)]
+        if not found:
+            say("No MCP clients found. Install Claude Desktop, Cursor, Claude Code or Codex first.")
+            return False
+        results = [
+            install(name, writes=writes, use_uvx=use_uvx, dry_run=dry_run, remove=remove, say=say, run=run)
+            for name in found
+        ]
+        return all(results)
+    if client not in CLIENTS:
+        raise ValueError(f"Unknown client {client!r}; choose one of: {', '.join(CLIENTS)}, all")
+
+    entry = server_entry(use_uvx, writes)
+    if client == "claude-desktop":
+        ok = all([_update_json(p, entry, remove=remove, dry_run=dry_run, say=say, label="Claude Desktop") for p in config_paths()])
+    elif client == "cursor":
+        ok = _update_json(cursor_path(), entry, remove=remove, dry_run=dry_run, say=say, label="Cursor")
+    elif client == "claude-code":
+        ok = _claude_code(entry, remove=remove, dry_run=dry_run, say=say, run=run)
+    else:
+        ok = _update_codex(codex_path(), entry, remove=remove, dry_run=dry_run, say=say)
+
+    if ok and not dry_run:
+        state = "removed" if remove else f"writes {'ON' if writes else 'off'}"
+        say(f"  ({state}) {RESTART[client]}")
+    return ok
+
+
+def install_claude_desktop(*, use_uvx: bool, dry_run: bool, writes: bool = False) -> bool:
+    """The original command, kept so existing docs and scripts still work."""
+    return install("claude-desktop", writes=writes, use_uvx=use_uvx, dry_run=dry_run)
+
+
+def _backup(path: Path) -> None:
     if path.exists():
-        shutil.copy2(path, path.with_suffix(".json.bak"))
+        shutil.copy2(path, path.with_name(path.name + ".bak"))
+
+
+def _update_json(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: bool, say: Say, label: str) -> bool:
+    """Claude Desktop and Cursor share the same shape: {"mcpServers": {name: entry}}."""
+    try:
+        config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except ValueError as exc:
+        say(f"{label}: {path} isn't valid JSON ({exc}); fix or delete it, then run this again.")
+        return False
+    servers = config.setdefault("mcpServers", {})
+    if remove:
+        servers.pop(SERVER_KEY, None)
+    else:
+        servers[SERVER_KEY] = entry
+    text = json.dumps(config, indent=2)
+    if dry_run:
+        # Only this server's entry: the rest of a client's config can hold private
+        # settings (folders, account ids) that people paste into issues with this output.
+        change = "remove" if remove else json.dumps({SERVER_KEY: entry}, indent=2)
+        say(f"# {label}: {path} (mcpServers, other entries unchanged)\n{change}")
+        return True
+    _backup(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    print(f"Added '{SERVER_KEY}' to {path}. Restart Claude Desktop to load it.", file=sys.stderr)
+    path.write_text(text, encoding="utf-8")
+    say(f"{label}: {'removed from' if remove else 'added to'} {path}")
+    return True
+
+
+def _claude_code(entry: dict[str, Any], *, remove: bool, dry_run: bool, say: Say, run: Run) -> bool:
+    """Claude Code manages its own config: use its CLI, at user scope (every folder)."""
+    env_flags = [flag for key, value in entry["env"].items() for flag in ("-e", f"{key}={value}")]
+    add = ["mcp", "add", SERVER_KEY, "-s", "user", *env_flags, "--", entry["command"], *entry["args"]]
+    claude = shutil.which("claude")
+    if dry_run or claude is None:
+        prefix = "Would run" if dry_run else "Claude Code: `claude` isn't on PATH. Install Claude Code, or run"
+        say(f"{prefix}: claude {' '.join(_quote(a) for a in (['mcp', 'remove', SERVER_KEY, '-s', 'user'] if remove else add))}")
+        return dry_run
+    removed = run([claude, "mcp", "remove", SERVER_KEY, "-s", "user"], capture_output=True, text=True, check=False)
+    problem = (getattr(removed, "stderr", "") or getattr(removed, "stdout", "") or "").strip()
+    missing = "not found" in problem.lower() or "no mcp server" in problem.lower()
+    if getattr(removed, "returncode", 0) != 0 and not missing:
+        # Couldn't take out the old entry (an unwritable config, say): stop before adding.
+        say(f"Claude Code: `claude mcp remove` failed ({problem or 'no details'}); nothing was changed.")
+        return False
+    if remove:
+        say("Claude Code: removed" if not missing else f"Claude Code: {SERVER_KEY} wasn't configured")
+        return True
+    done = run([claude, *add], capture_output=True, text=True, check=False)
+    output = (getattr(done, "stdout", "") or "").strip()
+    error = (getattr(done, "stderr", "") or "").strip()
+    if getattr(done, "returncode", 0) != 0:
+        say(
+            f"Claude Code: `claude mcp add` failed ({error or output or 'no details'}). "
+            f"{SERVER_KEY} isn't configured there now; fix that and run this again."
+        )
+        return False
+    say(f"Claude Code: {output or 'added'}")
+    return True
+
+
+def _update_codex(path: Path, entry: dict[str, Any], *, remove: bool, dry_run: bool, say: Say) -> bool:
+    """Codex keeps servers in config.toml as [mcp_servers.<name>] tables; other lines are kept as they are."""
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    kept: list[str] = []
+    skipping = False
+    table: tuple[str, ...] = ()
+    in_string = ""  # the delimiter of a multiline string the scan is inside, if any
+    for line in original.splitlines():
+        # Inside a multiline string a line is text, even if it looks like a header.
+        was_text = bool(in_string)  # this line starts inside a multiline string
+        key = None if was_text else _table_key(line)
+        in_string = _multiline_state(line, in_string)
+        if key is not None:
+            table = key
+            # This server's table and its subtables ([mcp_servers.<name>.env]), however spelled.
+            skipping = key[:2] == ("mcp_servers", SERVER_KEY)
+        elif not skipping and not was_text and _defines_ours(line, table):
+            say(
+                f"Codex: {path} already defines {SERVER_KEY} in a form this installer doesn't edit "
+                f"(line: {line.strip()!r}). Remove it, then run this again."
+            )
+            return False
+        if not skipping:
+            kept.append(line)
+    text = "\n".join(kept).rstrip()
+    block = ""
+    if not remove:
+        q = json.dumps  # a JSON string is also a valid TOML basic string
+        env = ", ".join(f"{q(key)} = {q(value)}" for key, value in entry["env"].items())  # quoted keys: always one key
+        args = ", ".join(q(a) for a in entry["args"])
+        inline = "{ " + env + " }"  # an inline TOML table (spelled out: braces are template syntax here)
+        block = f"[mcp_servers.{SERVER_KEY}]\ncommand = {q(entry['command'])}\nargs = [{args}]\nenv = {inline}"
+        text = f"{text}\n\n{block}" if text else block
+    text += "\n"
+    problem = _toml_problem(text)
+    if problem:
+        say(f"Codex: not changing {path}: the result wouldn't be valid TOML ({problem}). Nothing was written.")
+        return False
+    if dry_run:
+        change = f"remove [mcp_servers.{SERVER_KEY}]" if remove else block
+        say(f"# Codex: {path} (other settings unchanged)\n{change}")
+        return True
+    _backup(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    say(f"Codex: {'removed from' if remove else 'added to'} {path}")
+    return True
+
+
+def _multiline_state(line: str, in_string: str) -> str:
+    """Whether a multiline string (three double or single quotes) is still open after this line.
+
+    Scans character by character, so quotes inside ordinary one-line strings, escaped
+    quotes and comments are not mistaken for the start or end of a multiline string.
+    """
+    basic, literal = '"' * 3, "'" * 3
+    i, n = 0, len(line)
+    while i < n:
+        if in_string:
+            if in_string == basic and line[i] == "\\":
+                i += 2  # an escape inside a basic multiline string
+                continue
+            if line.startswith(in_string, i):
+                # A closing run may hold up to two extra quotes that belong to the string.
+                j = i + 3
+                while j < n and line[j] == in_string[0] and j - i < 5:
+                    j += 1
+                i, in_string = j, ""
+                continue
+            i += 1
+            continue
+        char = line[i]
+        if char == "#":
+            return ""
+        if line.startswith(basic, i) or line.startswith(literal, i):
+            in_string, i = line[i : i + 3], i + 3
+            continue
+        if char in "\"'":
+            # An ordinary one-line string: skip to its closing quote (escapes only in "...").
+            j = i + 1
+            while j < n and line[j] != char:
+                j += 2 if (char == '"' and line[j] == "\\") else 1
+            i = j + 1
+            continue
+        i += 1
+    return in_string
+
+
+def _table_key(line: str) -> tuple[str, ...] | None:
+    """The key of a TOML table header (`[a.b]`, `[ a . "b" ] # note`), or None for other lines."""
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    array = stripped.startswith("[[")
+    body, parts, current, quote = stripped[2 if array else 1 :], [], "", ""
+    for i, char in enumerate(body):
+        if quote:
+            if char == quote and not (quote == '"' and body[i - 1] == "\\"):
+                quote = ""
+            current += char
+        elif char in "\"'":
+            quote = char
+            current += char
+        elif char == ".":
+            parts.append(current)
+            current = ""
+        elif char == "]":
+            parts.append(current)
+            break
+        else:
+            current += char
+    else:
+        return None  # no closing bracket: not a header
+    keys = []
+    for part in parts:
+        part = part.strip()
+        if part.startswith('"'):
+            try:
+                part = json.loads(part)
+            except ValueError:
+                return None
+        elif part.startswith("'"):
+            part = part[1:-1]
+        keys.append(part)
+    return ("[[",) + tuple(keys) if array else tuple(keys)
+
+
+def _defines_ours(line: str, table: tuple[str, ...]) -> bool:
+    """A key line that sets this server outside its own table header (dotted keys)."""
+    names = (SERVER_KEY, f'"{SERVER_KEY}"', f"'{SERVER_KEY}'")
+    stripped = line.strip().replace(" ", "")
+    if table == ("mcp_servers",):
+        return any(stripped.startswith(n + "=") or stripped.startswith(n + ".") for n in names)
+    if table == ():
+        inline = stripped.startswith("mcp_servers=") and any(n in stripped for n in names)
+        return inline or any(stripped.startswith(f"mcp_servers.{n}") for n in names)
+    return False
+
+
+def _toml_problem(text: str) -> str | None:
+    """Why `text` isn't valid TOML, or None if it is (tomllib, or its tomli backport on 3.10)."""
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        return str(exc)
+    return None
+
+
+def _quote(arg: str) -> str:
+    return f'"{arg}"' if any(c in arg for c in ' \t"') else arg
