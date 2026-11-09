@@ -602,3 +602,40 @@ def test_users_commands_take_several_emails(tmp_path, monkeypatch, capsys):
         server.main(["users", "add", "ada@example.org,bob@example.org", "bad@example.org", "cy@example.org", "--writer"])
     assert added == [("ada@example.org", True), ("bob@example.org", True), ("cy@example.org", True)]
     assert "Not done for: bad@example.org" in capsys.readouterr().err
+
+
+def test_an_organization_name_shared_by_two_is_refused():
+    orgs = [{"slug": "a-org", "name": "Team"}, {"slug": "b-org", "name": "Team"}]
+    with pytest.raises(DeployError, match="a-org, b-org"):
+        create(FakeAccount(orgs=orgs), organization="Team")
+    account = FakeAccount(orgs=orgs)
+    create(account, organization="b-org")
+    assert account.sent("POST", "/v1/projects")[0][3]["organization_slug"] == "b-org"
+
+
+def test_a_refused_token_stops_the_wait_at_once():
+    class Refused(FakeAccount):
+        def __call__(self, method, url, headers, body):
+            if url.endswith(f"/v1/projects/{REF}") and method == "GET":
+                return 401, b'{"message":"Unauthorized"}'
+            return super().__call__(method, url, headers, body)
+
+    sleeps = []
+    with pytest.raises(DeployError, match="access token"):
+        deploy.wait_until_ready(Supabase(TOKEN, REF, Refused()), say=lambda _: None, sleep=sleeps.append, clock=lambda: 0)
+    assert sleeps == []
+
+
+def test_a_profile_file_is_resolved_to_its_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "darwin")
+    monkeypatch.setattr(deploy, "_is_wsl", lambda: False)
+    profile = tmp_path / "work.yaml"
+    profile.write_text("name: work-profile\napi_url: https://api.supabase.com\n")
+    asked = []
+
+    class Missing:
+        returncode = 1
+        stdout = ""
+
+    deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path), "SUPABASE_PROFILE": str(profile)}, run=lambda argv, **kw: asked.append(argv) or Missing())
+    assert asked[0][-2] == "work-profile"

@@ -129,6 +129,7 @@ def supabase_cli_token(env: Mapping[str, str], run: Callable[..., Any] = subproc
             profile = (home / "profile").read_text(encoding="utf-8").strip()
         except OSError:
             profile = ""
+    profile = _profile_name(profile)
     candidates: list[str | None] = []
     if not _is_wsl() and env.get("SUPABASE_NO_KEYRING") != "1":
         for account in (profile or "supabase", "access-token"):
@@ -142,6 +143,27 @@ def supabase_cli_token(env: Mapping[str, str], run: Callable[..., Any] = subproc
         if TOKEN_PATTERN.match(token):
             return token
     return None
+
+
+def _profile_name(profile: str) -> str:
+    """A profile can be a name or a path to a profile file; the CLI keys the login by its `name`."""
+    if not profile or not profile.lower().endswith((".yaml", ".yml", ".json", ".toml")):
+        return profile
+    try:
+        text = Path(profile).expanduser().read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if profile.lower().endswith(".toml"):
+        match = re.search(r'^\s*name\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+        return match.group(1) if match else ""
+    import yaml  # also reads JSON
+
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return ""
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) else ""
 
 
 def _is_wsl() -> bool:
@@ -538,7 +560,11 @@ def create_supabase_project(
     """
     orgs = account.organizations()
     if organization:
-        chosen = [o for o in orgs if organization in (o.get("slug"), o.get("name"))]
+        by_slug = [o for o in orgs if o.get("slug") == organization]
+        chosen = by_slug or [o for o in orgs if o.get("name") == organization]
+        if len(chosen) > 1:  # names aren't unique; never guess where a project (and a bill) goes
+            slugs = ", ".join(str(o.get("slug")) for o in chosen)
+            raise DeployError(f'More than one organization is called "{organization}". Pass its slug instead: {slugs}')
     else:
         chosen = orgs if len(orgs) == 1 else []
     if not chosen:
@@ -594,7 +620,8 @@ def wait_until_ready(
                 if supabase.signing_keys() or clock() - healthy_at > 120:
                     return
         except DeployError as exc:
-            if "couldn't start" in str(exc):
+            # Keep waiting through a starting project's hiccups, but not a refused token.
+            if "couldn't start" in str(exc) or "access token" in str(exc) or "answered 403" in str(exc):
                 raise
         if clock() >= deadline:
             raise DeployError(f"Project {supabase.ref} isn't ready after 15 minutes. Run the deploy again later; it picks up where it stopped.")
