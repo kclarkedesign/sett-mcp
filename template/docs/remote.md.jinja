@@ -9,19 +9,24 @@ Locally, each person runs their own copy over stdio. Remotely, one copy runs at 
 You need, once:
 
 1. **The Vercel CLI, logged in:** `npm install -g vercel`, then `vercel login`.
-2. **A Supabase project used only for this server** (the free plan works). Its *ref* is the 20 letters in its dashboard URL, `supabase.com/dashboard/project/<ref>`. The deploy changes the project's sign-in settings, so don't share it with a website. When creating it, keep **Enable Data API** on (the server writes audit rows through it); the other security options can be left as Supabase recommends.
-3. **A Supabase personal access token:** Account, Access Tokens, *Generate new token*. Set it as `SUPABASE_ACCESS_TOKEN`, or paste it when asked. It isn't saved anywhere.
+2. **A Supabase account** (the free plan works), signed in on this machine: install the [Supabase CLI](https://supabase.com/docs/guides/cli) and run `supabase login`, which opens a browser. The deploy reuses that sign-in. Without the CLI, create a personal access token (Account, Access Tokens) and set it as `SUPABASE_ACCESS_TOKEN`, or paste it when asked; it isn't saved anywhere. A token limited to one organization needs **Organization projects: read-write** to create projects.
 
 Then, from this folder:
 
 ```bash
-uv run {{ project_slug }} deploy vercel --auth supabase --supabase-project <ref>
+uv run {{ project_slug }} deploy vercel --auth supabase --create-supabase-project
 ```
+
+That creates a Supabase project just for this server, named after it, and waits a few minutes for it to start. It doesn't show or keep the new project's database password, because the server never uses it; if you ever want to connect to Postgres directly, reset it in Supabase under Project Settings, Database. If you belong to several Supabase organizations, the deploy lists them and asks you to choose with `--supabase-org`: give the name in quotes (`--supabase-org "My Org"`, quotes needed when it has spaces) or the slug it prints (`--supabase-org vqfxffrghdpitwkupmxe`). Pick deliberately: a project in an organization on a paid plan adds to that organization's bill, while a free organization allows two active projects (paused ones don't count). For a region other than the Americas, `--region emea`, `--region apac`, or a code such as `--region eu-central-1`.
+
+Already have a project for it? Use `--supabase-project <ref>` instead: the ref is the 20 letters in its dashboard URL. Use one that serves nothing else, since the deploy changes its sign-in settings, and keep its **Data API** on (the server writes audit rows through it).
 
 It prints each step and ends with the address to connect clients to, `https://<your-project>.vercel.app/mcp`. Run it again any time: it checks what's already there, keeps the shared confirmation key, and saves the project names (no secrets) in `sett-deploy.json` so later runs need no flags.
 
 | Option | What it does |
 |---|---|
+| `--create-supabase-project` | Creates a Supabase project for this server on the first deploy (with `--supabase-org`, `--region`) |
+| `--supabase-project <ref>` | Uses a project you made instead |
 | `--writes` | Lets users with the writer role write (sets `{{ env_prefix }}_ENABLE_WRITES=true`). Every deploy without it turns writes off |
 | `--github-client-id <id>` | Turns on GitHub sign-in; the secret comes from `GITHUB_CLIENT_SECRET` or a prompt |
 | `--vercel-project <name>` | The Vercel project to create or reuse (default `{{ project_slug }}`) |
@@ -52,6 +57,8 @@ uv run {{ project_slug }} users revoke bob@example.com         # back to reader
 uv run {{ project_slug }} users list
 ```
 
+Each command takes several emails at once, separated by spaces or commas: `users add ada@example.com bob@example.com --writer`.
+
 A role change applies when the person's client next refreshes its sign-in (within an hour), or right away if they sign in again. These commands use the same access token as the deploy and change `app_metadata.sett_role`; if you changed `{{ env_prefix }}_WRITER_CLAIM`, set roles your own way.
 
 Supabase's built-in email sender only delivers to members of your Supabase organization and is rate-limited. To send sign-in links to anyone else, add your own SMTP server (Authentication, Emails), or use GitHub sign-in.
@@ -69,7 +76,23 @@ GitHub sign-in links to the user you added with the same email, so `users add` c
 
 ### Connecting clients
 
-Add `https://<your-project>.vercel.app/mcp` as a remote (custom) connector in Claude, Cursor or another client. The client registers itself, sends you to the consent page to sign in and allow it, and then calls tools as you. Confirmations work as they do locally; the [client support table](https://github.com/kclarkedesign/sett-mcp#client-support) lists which clients can show them.
+Each person adds the server's address, `https://<your-project>.vercel.app/mcp`, to their own client. The client registers itself, sends them to the consent page to sign in and allow it, and then calls tools as them.
+
+**Claude (claude.ai and the desktop app):**
+
+1. In claude.ai, open **Settings, Connectors** and choose **Add custom connector**.
+2. Name it (for example `{{ project_name }}`) and paste the `/mcp` address. Add it, then choose **Connect**.
+3. The consent page opens: sign in with GitHub, or type your email, choose **Email me a link** and open the link **in the same browser**.
+4. Check the app and the return address it shows (`claude.ai/...`), then choose **Allow**.
+5. In a chat, turn the connector on and ask something like "search my contacts for Ada".
+
+Connectors belong to the Claude account, so one added on claude.ai also appears in the Claude desktop app.
+
+**Cursor:** add the address as a remote MCP server in Cursor's MCP settings (`"url": "https://<your-project>.vercel.app/mcp"` in `~/.cursor/mcp.json`); Cursor opens the consent page when it first connects.
+
+**Codex:** `codex mcp add <name> --url https://<your-project>.vercel.app/mcp`, then `codex mcp login <name>` to sign in.
+
+Confirmations work as they do locally; the [client support table](https://github.com/kclarkedesign/sett-mcp#client-support) lists which clients can show them.
 
 ### A custom domain
 

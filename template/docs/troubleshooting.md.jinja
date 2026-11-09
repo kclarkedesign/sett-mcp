@@ -14,6 +14,17 @@ uv run {{ project_slug }} install all --dry-run              # show what would c
 uv run {{ project_slug }}                                    # run the server by hand (it waits silently for a client; Ctrl+C to stop)
 ```
 
+Once it's deployed (`docs/remote.md`):
+
+```bash
+uv run {{ project_slug }} deploy vercel --auth supabase --create-supabase-project --writes   # first deploy
+uv run {{ project_slug }} deploy vercel --auth supabase --writes                             # every later deploy
+uv run {{ project_slug }} users add ada@example.com bob@example.com --writer                 # let people sign in (spaces or commas)
+uv run {{ project_slug }} users grant bob@example.com                                        # make a writer
+uv run {{ project_slug }} users revoke bob@example.com                                       # back to reader
+uv run {{ project_slug }} users list
+```
+
 ## Connecting a client
 
 | You see | Why | Fix |
@@ -44,10 +55,15 @@ uv run {{ project_slug }}                                    # run the server by
 | The deploy waits on a step with no output | The Vercel CLI asked a question (older CLIs) | Answer it in the terminal; the deploy carries on |
 | "The server ... didn't come up (HTTP 404)" | Vercel didn't run the app as Python | Check `vercel.json` (`"framework": "python"`) and `asgi.py` are in this folder |
 | "didn't come up" with another error | A setting is missing or wrong | `vercel logs --deployment <your-project>.vercel.app` names it |
+| "Which Supabase organization?" | You belong to more than one | Add `--supabase-org` with the name in quotes (`--supabase-org "My Org"`) or the slug from the list. Choose a free organization unless you mean to pay: a project in a paid one adds to its bill |
+| Creating the project is refused, mentioning the free plan | The free plan allows two active projects across the organizations you own or administer | Pause or delete one in the Supabase dashboard, or use `--supabase-project <ref>` with an existing project |
+| "isn't ready after 15 minutes" | The new project is still starting | Run the same deploy again later: the project was saved, so it carries on instead of creating another |
+| It asks for a Supabase access token although you ran `supabase login` | The deploy couldn't read the CLI's saved sign-in (a different profile, or a keyring it can't open) | Set `SUPABASE_ACCESS_TOKEN`, or paste a token from Account, Access Tokens |
 | "still signs tokens with a shared secret" | The Supabase project uses the legacy JWT secret | Supabase dashboard, Authentication, JWT Keys, "Rotate keys"; then deploy again |
 | "This Supabase project's Site URL is ..." | The project already serves another site | Use a Supabase project just for this server, or `--yes` if that address was this server's |
 | No rows in the `sett_audit` table, "403" in Vercel's logs | Supabase's Data API is off, or the table predates Sett 0.3.0 | Turn on the Data API (Project Settings, Data API), and run `grant insert on table public.sett_audit to service_role;` in the SQL editor |
-| Signing in says "Signups not allowed" | The email wasn't added, or GitHub's email differs from the one added | `uv run {{ project_slug }} users add <email>` with the address the person signs in with |
+| Signing in says "Signups not allowed" | The email wasn't added, or GitHub's email differs from the one added | `uv run {{ project_slug }} users add <email>` with the address the person signs in with (several at once: separate them with spaces or commas) |
+| The connector says it can't connect, or the consent page never opens | The address is missing `/mcp`, or a popup blocker stopped the sign-in window | Use the full `https://<your-project>.vercel.app/mcp` and allow popups for claude.ai |
 | The sign-in email never arrives | Supabase's built-in sender only mails members of your Supabase organization, a few times an hour | Add your own SMTP server (Supabase, Authentication, Emails), or use GitHub sign-in |
 | A user can read but not write | They don't have the writer role, or their sign-in predates it | `uv run {{ project_slug }} users grant <email>`; it applies within an hour, or at once if they sign in again |
 | Everything stopped working after a week | Free Supabase projects pause when idle | Restore the project in the Supabase dashboard |

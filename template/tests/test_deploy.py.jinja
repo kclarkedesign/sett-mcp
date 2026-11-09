@@ -273,7 +273,11 @@ def test_writes_and_github_only_when_asked(run):
 def test_secret_key_is_created_when_the_project_has_none(run):
     supabase = FakeSupabase(keys=[{"type": "publishable", "api_key": "sb_publishable_x"}])
     _, supabase, vercel = run(supabase=supabase)
-    assert supabase.sent("POST", "/api-keys?reveal=true")[0][3] == {"type": "secret", "name": "sett_server"}
+    assert supabase.sent("POST", "/api-keys?reveal=true")[0][3] == {
+        "type": "secret",
+        "name": "sett_server",
+        "secret_jwt_template": {"role": "service_role"},
+    }
     assert vercel.env[f"{PREFIX}_SUPABASE_SECRET_KEY"] == "sb_secret_new"
 
 
@@ -385,3 +389,259 @@ def test_vercel_runs_the_root_entry_point_as_python():
     assert "from {{ package_name }}.asgi import app" in (root / "asgi.py").read_text()
     # Without this, a project created by `vercel project add` is "Other" and serves only static files.
     assert json.loads((root / "vercel.json").read_text())["framework"] == "python"
+
+
+# --- creating the Supabase project, and reusing `supabase login` --------------------------
+
+TOKEN = "sbp_" + "a" * 40
+
+
+class FakeAccount(FakeSupabase):
+    """Adds organizations, project creation and a project that takes a few polls to start."""
+
+    def __init__(self, orgs=None, polls_until_healthy=2, **kw):
+        super().__init__(**kw)
+        self.orgs = orgs if orgs is not None else [{"id": "1", "slug": "kirk-org", "name": "Kirk"}]
+        self.polls = polls_until_healthy
+        self.create_status = 201
+
+    def __call__(self, method, url, headers, body):
+        data = json.loads(body) if body else None
+        if url == "https://api.supabase.com/v1/organizations":
+            self.calls.append((method, url, dict(headers), data))
+            return 200, json.dumps(self.orgs).encode()
+        if url == "https://api.supabase.com/v1/projects" and method == "POST":
+            self.calls.append((method, url, dict(headers), data))
+            if self.create_status >= 400:
+                return self.create_status, b'{"message":"free project limit reached"}'
+            return 201, json.dumps({"ref": REF, "status": "COMING_UP"}).encode()
+        if url.endswith(f"/v1/projects/{REF}/health?services=auth,db,rest"):
+            self.calls.append((method, url, dict(headers), data))
+            self.polls -= 1
+            status = "ACTIVE_HEALTHY" if self.polls <= 0 else "COMING_UP"
+            return 200, json.dumps([{"name": n, "status": status} for n in ("auth", "db", "rest")]).encode()
+        return super().__call__(method, url, headers, body)
+
+
+def create(account, **kw):
+    clock = iter(range(0, 10_000, 5))
+    return deploy.create_supabase_project(
+        deploy.SupabaseAccount(TOKEN, account), "my-server", say=lambda _: None, sleep=lambda _: None,
+        clock=lambda: next(clock), **kw,
+    )
+
+
+def test_creates_a_project_and_waits_until_it_is_healthy():
+    account = FakeAccount(polls_until_healthy=3)
+    said = []
+    clock = iter(range(0, 10_000, 5))
+    ref = deploy.create_supabase_project(
+        deploy.SupabaseAccount(TOKEN, account), "my-server", say=said.append, sleep=lambda _: None, clock=lambda: next(clock)
+    )
+    assert ref == REF
+    (call,) = account.sent("POST", "/v1/projects")
+    body = call[3]
+    assert body["db_pass"] not in "\n".join(said)  # never printed
+    assert body["name"] == "my-server" and body["organization_slug"] == "kirk-org"
+    assert body["region_selection"] == {"type": "smartGroup", "code": "americas"}
+    assert len(body["db_pass"]) == 24 and body["db_pass"].isalnum()
+    assert len(account.sent("GET", "/health?services=auth,db,rest")) == 3
+
+
+def test_a_specific_region_is_sent_as_specific():
+    account = FakeAccount()
+    create(account, region="eu-central-1")
+    assert account.sent("POST", "/v1/projects")[0][3]["region_selection"] == {"type": "specific", "code": "eu-central-1"}
+
+
+def test_several_organizations_need_a_choice():
+    orgs = [{"slug": "a-org", "name": "Work"}, {"slug": "b-org", "name": "Personal"}]
+    with pytest.raises(DeployError, match="a-org \\(Work\\), b-org \\(Personal\\)") as refused:
+        create(FakeAccount(orgs=orgs))
+    assert '--supabase-org "Work"' in str(refused.value) and "bill" in str(refused.value)
+    account = FakeAccount(orgs=orgs)
+    create(account, organization="Personal")
+    assert account.sent("POST", "/v1/projects")[0][3]["organization_slug"] == "b-org"
+
+
+def test_a_refused_create_explains_the_free_plan_limit():
+    account = FakeAccount()
+    account.create_status = 400
+    with pytest.raises(DeployError, match="two active projects"):
+        create(account)
+
+
+def test_a_project_that_never_starts_times_out_with_a_rerun_hint():
+    with pytest.raises(DeployError, match="Run the deploy again later"):
+        create(FakeAccount(polls_until_healthy=10_000))
+
+
+class NoPublishableKey(FakeSupabase):
+    def __call__(self, method, url, headers, body):
+        if method == "POST" and url.endswith("/api-keys?reveal=true") and json.loads(body)["type"] == "publishable":
+            self.calls.append((method, url, dict(headers), json.loads(body)))
+            return 201, json.dumps({"type": "publishable", "api_key": "sb_publishable_new"}).encode()
+        return super().__call__(method, url, headers, body)
+
+
+def test_a_missing_publishable_key_is_created(run):
+    supabase = NoPublishableKey(keys=[{"type": "secret", "api_key": "sb_secret_y"}])
+    _, _, vercel = run(supabase=supabase)
+    assert vercel.env[f"{PREFIX}_SUPABASE_PUBLISHABLE_KEY"] == "sb_publishable_new"
+    assert supabase.sent("POST", "/api-keys?reveal=true")[0][3] == {"type": "publishable", "name": "default"}
+
+
+def test_the_env_token_wins(monkeypatch):
+    called = []
+    token = deploy.access_token({"SUPABASE_ACCESS_TOKEN": " sbp_env "}, cli_login=lambda env: called.append(1), ask=lambda _: "x")
+    assert token == "sbp_env" and not called
+
+
+def test_the_supabase_cli_login_is_used_before_asking():
+    said = []
+    token = deploy.access_token({}, cli_login=lambda env: TOKEN, ask=lambda _: pytest.fail("asked"), say=said.append)
+    assert token == TOKEN and "supabase login" in said[0]
+
+
+def test_asks_when_there_is_no_login():
+    assert deploy.access_token({}, cli_login=lambda env: None, ask=lambda _: " pasted ") == "pasted"
+
+
+def test_reads_the_cli_token_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "linux")
+    monkeypatch.setattr(deploy.shutil, "which", lambda name: None)  # no secret-tool
+    (tmp_path / "access-token").write_text(TOKEN + "\n")
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}) == TOKEN
+
+
+def test_ignores_a_file_that_isnt_a_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "linux")
+    monkeypatch.setattr(deploy.shutil, "which", lambda name: None)
+    (tmp_path / "access-token").write_text("not a token")
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}) is None
+
+
+def test_reads_the_macos_keychain_with_the_profile_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "darwin")
+    monkeypatch.setattr(deploy, "_is_wsl", lambda: False)
+    (tmp_path / "profile").write_text("work\n")
+    asked = []
+
+    class Done:
+        returncode = 0
+        stdout = "go-keyring-base64:" + __import__("base64").b64encode(TOKEN.encode()).decode() + "\n"
+
+    def run(argv, **kw):
+        asked.append(argv)
+        return Done()
+
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}, run=run) == TOKEN
+    assert asked[0] == ["security", "find-generic-password", "-s", "Supabase CLI", "-a", "work", "-w"]
+
+
+def test_reads_windows_credential_manager(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "win32")
+    monkeypatch.setattr(deploy, "_is_wsl", lambda: False)
+    targets = []
+
+    def credential(target):
+        targets.append(target)
+        return TOKEN if target.endswith(":access-token") else None
+
+    monkeypatch.setattr(deploy, "_windows_credential", credential)
+    assert deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path)}) == TOKEN
+    assert targets == ["Supabase CLI:supabase", "Supabase CLI:access-token"]
+
+
+def test_the_ref_is_handed_over_before_the_wait():
+    saved = []
+    with pytest.raises(DeployError, match="Run the deploy again later"):
+        create(FakeAccount(polls_until_healthy=10_000), on_created=saved.append)
+    assert saved == [REF]  # known before the wait timed out, so a rerun can resume
+
+
+def test_a_rerun_resumes_a_project_that_was_still_starting(tmp_path, monkeypatch):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server", "supabase_starting": True})
+    for name in ("pyproject.toml", "asgi.py", "vercel.json"):
+        (tmp_path / name).write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    waited, deployed = [], []
+    monkeypatch.setattr(deploy, "wait_until_ready", lambda supabase, **kw: waited.append(supabase.ref))
+    monkeypatch.setattr(deploy, "deploy", lambda options, supabase, vercel: deployed.append(supabase.ref))
+    monkeypatch.setattr(deploy, "create_supabase_project", lambda *a, **k: pytest.fail("created a second project"))
+    server.main(["deploy", "vercel", "--auth", "supabase"])
+    assert waited == [REF] and deployed == [REF]
+    assert "supabase_starting" not in deploy.load_state(tmp_path)
+
+
+def test_create_is_refused_once_a_project_was_saved(tmp_path, monkeypatch, capsys):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF, "vercel_project": "my-server"})
+    for name in ("pyproject.toml", "asgi.py", "vercel.json"):
+        (tmp_path / name).write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    with pytest.raises(SystemExit):
+        server.main(["deploy", "vercel", "--auth", "supabase", "--create-supabase-project"])
+    assert "already has Supabase project" in capsys.readouterr().err
+
+
+def test_users_commands_take_several_emails(tmp_path, monkeypatch, capsys):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    added = []
+
+    def add_user(supabase, email, writer):
+        if email == "bad@example.org":
+            raise DeployError("Couldn't add bad@example.org")
+        added.append((email, writer))
+
+    monkeypatch.setattr(deploy, "add_user", add_user)
+    with pytest.raises(SystemExit):
+        server.main(["users", "add", "ada@example.org,bob@example.org", "bad@example.org", "cy@example.org", "--writer"])
+    assert added == [("ada@example.org", True), ("bob@example.org", True), ("cy@example.org", True)]
+    assert "Not done for: bad@example.org" in capsys.readouterr().err
+
+
+def test_an_organization_name_shared_by_two_is_refused():
+    orgs = [{"slug": "a-org", "name": "Team"}, {"slug": "b-org", "name": "Team"}]
+    with pytest.raises(DeployError, match="a-org, b-org"):
+        create(FakeAccount(orgs=orgs), organization="Team")
+    account = FakeAccount(orgs=orgs)
+    create(account, organization="b-org")
+    assert account.sent("POST", "/v1/projects")[0][3]["organization_slug"] == "b-org"
+
+
+def test_a_refused_token_stops_the_wait_at_once():
+    class Refused(FakeAccount):
+        def __call__(self, method, url, headers, body):
+            if url.endswith(f"/v1/projects/{REF}") and method == "GET":
+                return 401, b'{"message":"Unauthorized"}'
+            return super().__call__(method, url, headers, body)
+
+    sleeps = []
+    with pytest.raises(DeployError, match="access token"):
+        deploy.wait_until_ready(Supabase(TOKEN, REF, Refused()), say=lambda _: None, sleep=sleeps.append, clock=lambda: 0)
+    assert sleeps == []
+
+
+def test_a_profile_file_is_resolved_to_its_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "platform", "darwin")
+    monkeypatch.setattr(deploy, "_is_wsl", lambda: False)
+    profile = tmp_path / "work.yaml"
+    profile.write_text("name: work-profile\napi_url: https://api.supabase.com\n")
+    asked = []
+
+    class Missing:
+        returncode = 1
+        stdout = ""
+
+    deploy.supabase_cli_token({"SUPABASE_HOME": str(tmp_path), "SUPABASE_PROFILE": str(profile)}, run=lambda argv, **kw: asked.append(argv) or Missing())
+    assert asked[0][-2] == "work-profile"

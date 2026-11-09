@@ -191,6 +191,9 @@ def main(argv: list[str] | None = None) -> None:
     vercel = targets.add_parser("vercel", help="Deploy to your Vercel account, with Supabase for sign-in")
     vercel.add_argument("--auth", choices=["supabase"], default="supabase", help="Who handles sign-in")
     vercel.add_argument("--supabase-project", help="Project ref or URL (saved after the first deploy)")
+    vercel.add_argument("--create-supabase-project", action="store_true", help="Create a Supabase project for this server")
+    vercel.add_argument("--supabase-org", help="Organization for the new project, if you have more than one")
+    vercel.add_argument("--region", default="americas", help="Region for the new project: americas, emea, apac or a code such as eu-central-1")
     vercel.add_argument("--vercel-project", help="Vercel project name (default: {{ project_slug }})")
     vercel.add_argument("--scope", help="Vercel team slug (default: the CLI's current team; `vercel teams ls` lists them)")
     vercel.add_argument("--writes", action="store_true", help="Let users with the writer role write")
@@ -200,11 +203,12 @@ def main(argv: list[str] | None = None) -> None:
     users = commands.add_parser("users", help="Manage who can sign in to the deployed server")
     users.add_argument("--supabase-project", help="Project ref or URL (default: the one the deploy saved)")
     user_commands = users.add_subparsers(dest="action", required=True)
-    add = user_commands.add_parser("add", help="Let someone sign in")
-    add.add_argument("email")
+    emails_help = "One or more emails, separated by spaces or commas"
+    add = user_commands.add_parser("add", help="Let people sign in")
+    add.add_argument("emails", nargs="+", help=emails_help)
     add.add_argument("--writer", action="store_true", help="Also give them the writer role")
-    user_commands.add_parser("grant", help="Give someone the writer role").add_argument("email")
-    user_commands.add_parser("revoke", help="Take the writer role away").add_argument("email")
+    user_commands.add_parser("grant", help="Give people the writer role").add_argument("emails", nargs="+", help=emails_help)
+    user_commands.add_parser("revoke", help="Take the writer role away").add_argument("emails", nargs="+", help=emails_help)
     user_commands.add_parser("list", help="List everyone who can sign in")
 
     args = parser.parse_args(argv)
@@ -254,12 +258,22 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
     cwd = Path.cwd()
     if args.command == "users":
         supabase = deploy.supabase_for(cwd, args.supabase_project)
-        if args.action == "add":
-            deploy.add_user(supabase, args.email, args.writer)
-        elif args.action == "list":
+        if args.action == "list":
             deploy.list_users(supabase)
-        else:
-            deploy.set_writer(supabase, args.email, args.action == "grant")
+            return
+        emails = [e.strip() for value in args.emails for e in value.split(",") if e.strip()]
+        failed = []
+        for email in emails:
+            try:
+                if args.action == "add":
+                    deploy.add_user(supabase, email, args.writer)
+                else:
+                    deploy.set_writer(supabase, email, args.action == "grant")
+            except deploy.DeployError as exc:  # carry on with the others, then report
+                sys.stderr.write(f"{exc}\n")
+                failed.append(email)
+        if failed:
+            raise deploy.DeployError(f"Not done for: {', '.join(failed)}")
         return
 
     if not all((cwd / name).exists() for name in ("pyproject.toml", "asgi.py", "vercel.json")):
@@ -269,17 +283,42 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
         )
     state = deploy.load_state(cwd)
     ref = args.supabase_project or state.get("supabase_project")
+    vercel_project = args.vercel_project or state.get("vercel_project") or "{{ project_slug }}"
+    token = deploy.access_token(os.environ)
+    if args.create_supabase_project:
+        if ref:
+            raise deploy.DeployError(
+                f"This server already has Supabase project {ref}. Drop --create-supabase-project to deploy to it."
+            )
+        account = deploy.SupabaseAccount(token)
+
+        def remember(new_ref: str) -> None:
+            # Saved the moment Supabase returns it: a run stopped while the project starts
+            # resumes on the next run instead of creating a second project.
+            state.update({"supabase_project": new_ref, "vercel_project": vercel_project, "supabase_starting": True})
+            deploy.save_state(cwd, state)
+
+        ref = deploy.create_supabase_project(
+            account, vercel_project, organization=args.supabase_org, region=args.region, on_created=remember
+        )
+        state.pop("supabase_starting", None)
+        deploy.save_state(cwd, state)
+    elif ref and state.get("supabase_starting"):
+        # An earlier run created the project but stopped before it was ready.
+        deploy.wait_until_ready(deploy.Supabase(token, deploy.project_ref(ref)))
+        state.pop("supabase_starting", None)
+        deploy.save_state(cwd, state)
     if not ref:
         raise deploy.DeployError(
-            "Which Supabase project? Create one just for this server, then pass --supabase-project <ref> "
-            "(the ref is in its dashboard URL: supabase.com/dashboard/project/<ref>)"
+            "Which Supabase project? Add --create-supabase-project to make one for this server, or pass "
+            "--supabase-project <ref> for one you made (the ref is in its dashboard URL)"
         )
     github_secret = None
     if args.github_client_id:
         github_secret = os.environ.get("GITHUB_CLIENT_SECRET", "").strip() or getpass.getpass("GitHub client secret: ").strip()
     scope = args.scope or state.get("vercel_scope")
     options = deploy.DeployOptions(
-        vercel_project=args.vercel_project or state.get("vercel_project") or "{{ project_slug }}",
+        vercel_project=vercel_project,
         env_prefix=ENV_PREFIX,
         cwd=cwd,
         enable_writes=args.writes,
@@ -289,7 +328,7 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
         command="uv run {{ project_slug }}",
         team_chosen=bool(args.scope),
     )
-    supabase = deploy.Supabase(deploy.access_token(os.environ), deploy.project_ref(ref))
+    supabase = deploy.Supabase(token, deploy.project_ref(ref))
     deploy.deploy(options, supabase, deploy.Vercel(cwd, scope))
 
 
