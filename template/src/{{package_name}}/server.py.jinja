@@ -203,11 +203,12 @@ def main(argv: list[str] | None = None) -> None:
     users = commands.add_parser("users", help="Manage who can sign in to the deployed server")
     users.add_argument("--supabase-project", help="Project ref or URL (default: the one the deploy saved)")
     user_commands = users.add_subparsers(dest="action", required=True)
-    add = user_commands.add_parser("add", help="Let someone sign in")
-    add.add_argument("email")
+    emails_help = "One or more emails, separated by spaces or commas"
+    add = user_commands.add_parser("add", help="Let people sign in")
+    add.add_argument("emails", nargs="+", help=emails_help)
     add.add_argument("--writer", action="store_true", help="Also give them the writer role")
-    user_commands.add_parser("grant", help="Give someone the writer role").add_argument("email")
-    user_commands.add_parser("revoke", help="Take the writer role away").add_argument("email")
+    user_commands.add_parser("grant", help="Give people the writer role").add_argument("emails", nargs="+", help=emails_help)
+    user_commands.add_parser("revoke", help="Take the writer role away").add_argument("emails", nargs="+", help=emails_help)
     user_commands.add_parser("list", help="List everyone who can sign in")
 
     args = parser.parse_args(argv)
@@ -257,12 +258,22 @@ def _deploy_or_users(args: argparse.Namespace) -> None:
     cwd = Path.cwd()
     if args.command == "users":
         supabase = deploy.supabase_for(cwd, args.supabase_project)
-        if args.action == "add":
-            deploy.add_user(supabase, args.email, args.writer)
-        elif args.action == "list":
+        if args.action == "list":
             deploy.list_users(supabase)
-        else:
-            deploy.set_writer(supabase, args.email, args.action == "grant")
+            return
+        emails = [e.strip() for value in args.emails for e in value.split(",") if e.strip()]
+        failed = []
+        for email in emails:
+            try:
+                if args.action == "add":
+                    deploy.add_user(supabase, email, args.writer)
+                else:
+                    deploy.set_writer(supabase, email, args.action == "grant")
+            except deploy.DeployError as exc:  # carry on with the others, then report
+                sys.stderr.write(f"{exc}\n")
+                failed.append(email)
+        if failed:
+            raise deploy.DeployError(f"Not done for: {', '.join(failed)}")
         return
 
     if not all((cwd / name).exists() for name in ("pyproject.toml", "asgi.py", "vercel.json")):

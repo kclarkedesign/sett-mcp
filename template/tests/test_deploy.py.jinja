@@ -582,3 +582,23 @@ def test_create_is_refused_once_a_project_was_saved(tmp_path, monkeypatch, capsy
     with pytest.raises(SystemExit):
         server.main(["deploy", "vercel", "--auth", "supabase", "--create-supabase-project"])
     assert "already has Supabase project" in capsys.readouterr().err
+
+
+def test_users_commands_take_several_emails(tmp_path, monkeypatch, capsys):
+    from {{ package_name }} import server
+
+    deploy.save_state(tmp_path, {"supabase_project": REF})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", TOKEN)
+    added = []
+
+    def add_user(supabase, email, writer):
+        if email == "bad@example.org":
+            raise DeployError("Couldn't add bad@example.org")
+        added.append((email, writer))
+
+    monkeypatch.setattr(deploy, "add_user", add_user)
+    with pytest.raises(SystemExit):
+        server.main(["users", "add", "ada@example.org,bob@example.org", "bad@example.org", "cy@example.org", "--writer"])
+    assert added == [("ada@example.org", True), ("bob@example.org", True), ("cy@example.org", True)]
+    assert "Not done for: bad@example.org" in capsys.readouterr().err

@@ -57,6 +57,8 @@ uv run {{ project_slug }} users revoke bob@example.com         # back to reader
 uv run {{ project_slug }} users list
 ```
 
+Each command takes several emails at once, separated by spaces or commas: `users add ada@example.com bob@example.com --writer`.
+
 A role change applies when the person's client next refreshes its sign-in (within an hour), or right away if they sign in again. These commands use the same access token as the deploy and change `app_metadata.sett_role`; if you changed `{{ env_prefix }}_WRITER_CLAIM`, set roles your own way.
 
 Supabase's built-in email sender only delivers to members of your Supabase organization and is rate-limited. To send sign-in links to anyone else, add your own SMTP server (Authentication, Emails), or use GitHub sign-in.
