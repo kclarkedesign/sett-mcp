@@ -81,7 +81,7 @@ uv run my-server deploy vercel --auth supabase --create-supabase-project --write
 uv run my-server users add you@example.com --writer
 ```
 
-Before the first deploy, install and sign in to two command-line tools, once: `npm install -g vercel` then `vercel login`, and the [Supabase CLI](https://supabase.com/docs/guides/cli) then `supabase login`. Both open a browser. The deploy creates the Supabase project itself. Your project's `docs/remote.md` has the details.
+Before the first deploy, install and sign in to two command-line tools, once: `npm install -g vercel` then `vercel login`, and the [Supabase CLI](https://supabase.com/docs/guides/cli) then `supabase login`. Both open a browser. The deploy creates the Supabase project itself. If you belong to several Supabase organizations, it asks which: add `--supabase-org "Org name"` (in quotes) or the slug it lists, and pick a free organization unless you mean to pay for the project. Your project's `docs/remote.md` has the details.
 
 ## Updating a project later
 

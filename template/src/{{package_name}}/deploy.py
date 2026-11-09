@@ -545,7 +545,13 @@ def create_supabase_project(
         listed = ", ".join(f"{o.get('slug')} ({o.get('name')})" for o in orgs) or "none found"
         if not orgs:
             raise DeployError("Your Supabase account has no organization yet. Create one at supabase.com/dashboard, then run this again.")
-        raise DeployError(f"Which Supabase organization? Pass --supabase-org with one of: {listed}")
+        example = next((o.get("name") for o in orgs if o.get("name")), "My Org")
+        raise DeployError(
+            f"Which Supabase organization? You belong to several: {listed}.\n"
+            f'Add --supabase-org with its name in quotes (--supabase-org "{example}") or its slug. '
+            "A project in an organization on a paid plan adds to that organization's bill; "
+            "a free organization allows two active projects."
+        )
     slug = str(chosen[0].get("slug"))
     # The database password is only needed to connect to Postgres directly; the server never uses it.
     db_pass = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24))

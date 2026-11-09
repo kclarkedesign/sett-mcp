@@ -450,8 +450,9 @@ def test_a_specific_region_is_sent_as_specific():
 
 def test_several_organizations_need_a_choice():
     orgs = [{"slug": "a-org", "name": "Work"}, {"slug": "b-org", "name": "Personal"}]
-    with pytest.raises(DeployError, match="a-org \\(Work\\), b-org \\(Personal\\)"):
+    with pytest.raises(DeployError, match="a-org \\(Work\\), b-org \\(Personal\\)") as refused:
         create(FakeAccount(orgs=orgs))
+    assert '--supabase-org "Work"' in str(refused.value) and "bill" in str(refused.value)
     account = FakeAccount(orgs=orgs)
     create(account, organization="Personal")
     assert account.sent("POST", "/v1/projects")[0][3]["organization_slug"] == "b-org"

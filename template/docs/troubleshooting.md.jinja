@@ -44,7 +44,7 @@ uv run {{ project_slug }}                                    # run the server by
 | The deploy waits on a step with no output | The Vercel CLI asked a question (older CLIs) | Answer it in the terminal; the deploy carries on |
 | "The server ... didn't come up (HTTP 404)" | Vercel didn't run the app as Python | Check `vercel.json` (`"framework": "python"`) and `asgi.py` are in this folder |
 | "didn't come up" with another error | A setting is missing or wrong | `vercel logs --deployment <your-project>.vercel.app` names it |
-| "Which Supabase organization?" | You belong to more than one | Add `--supabase-org <slug>` with one from the list it prints |
+| "Which Supabase organization?" | You belong to more than one | Add `--supabase-org` with the name in quotes (`--supabase-org "My Org"`) or the slug from the list. Choose a free organization unless you mean to pay: a project in a paid one adds to its bill |
 | Creating the project is refused, mentioning the free plan | The free plan allows two active projects across the organizations you own or administer | Pause or delete one in the Supabase dashboard, or use `--supabase-project <ref>` with an existing project |
 | "isn't ready after 15 minutes" | The new project is still starting | Run the same deploy again later: the project was saved, so it carries on instead of creating another |
 | It asks for a Supabase access token although you ran `supabase login` | The deploy couldn't read the CLI's saved sign-in (a different profile, or a keyring it can't open) | Set `SUPABASE_ACCESS_TOKEN`, or paste a token from Account, Access Tokens |
