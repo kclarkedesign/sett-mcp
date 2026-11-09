@@ -87,8 +87,8 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
                 return results
             add(Result("PASS", "Token accepted"))
         else:
-            add(Result("INFO", "Tools not checked", "", "Run again with --token <access token> to check the tools too"))
             _check_get(url, request, None, add)
+            add(Result("INFO", "Tools not checked", "Add --token - to check them too (it asks for an access token)"))
             return results
     elif status == 200:
         if loopback:
@@ -293,10 +293,12 @@ def report(results: list[Result], say: Callable[[str], None] = print) -> int:
         if r.detail:
             line += f"  {r.detail}"
         say(line.rstrip())
-        if r.fix and r.status in ("FAIL", "WARN", "INFO"):
+        if r.fix and r.status in ("FAIL", "WARN"):
             say(f"{'':<6}{'':<{width}}  -> {r.fix}")
     failed = sum(r.status == "FAIL" for r in results)
     warned = sum(r.status == "WARN" for r in results)
     say("")
-    say(f"{failed} failed, {warned} warning{'s' if warned != 1 else ''}." if failed or warned else "All checks passed.")
+    passed = sum(r.status == "PASS" for r in results)
+    summary = f"{failed} failed, {warned} warning{'s' if warned != 1 else ''}, {passed} passed." if failed or warned else f"All {passed} checks passed."
+    say(summary)
     return 1 if failed else 0
