@@ -246,6 +246,59 @@ def test_every_page_of_tools_is_checked(server):
     assert statuses(results)["Tool descriptions"] == "WARN"
 
 
+def test_a_connection_lost_after_initialize_is_reported_not_raised(server):
+    url, _ = server()
+    calls = []
+
+    def flaky(method, target, headers, body):
+        calls.append(method)
+        if len(calls) > 1:
+            raise ConnectionResetError("connection reset by peer")
+        return check_module.http_request(method, target, headers, body)
+
+    results = check(url, request=flaky)
+    assert statuses(results)["Initialize"] == "PASS"
+    assert statuses(results)["Connection"] == "FAIL"
+
+
+def test_malformed_tools_are_reported_and_the_rest_still_checked(server):
+    tools = [
+        TOOLS[0],
+        {"name": "acme_string_schema", "description": "A tool whose schema is a string.", "inputSchema": "nope"},
+        {"name": "acme_list_properties", "description": "A tool whose properties is a list.", "inputSchema": {"type": "object", "properties": ["q"]}},
+        {"name": "acme_odd_annotations", "description": "A tool whose annotations is a string.", "inputSchema": {"type": "object"}, "annotations": "x"},
+        "not a tool",
+    ]
+    url, _ = server(tools=tools)
+    results = check(url)
+    malformed = next(r for r in results if r.name == "Tool definitions")
+    assert malformed.status == "FAIL"
+    for name in ("acme_string_schema", "acme_list_properties", "acme_odd_annotations", "tool #5"):
+        assert name in malformed.detail
+    assert statuses(results)["Parameter descriptions"] == "PASS"
+
+
+def test_a_non_object_result_fails_initialize_cleanly(server):
+    url, _ = server()
+
+    def odd(method, target, headers, body):
+        return 200, {"content-type": "application/json"}, b'{"jsonrpc": "2.0", "id": 1, "result": ["x"]}'
+
+    assert statuses(check(url, request=odd))["Initialize"] == "FAIL"
+
+
+@pytest.mark.parametrize("servers", [True, "https://x.example", [], [1]])
+def test_odd_authorization_servers_fail_cleanly(servers):
+    def odd(method, target, headers, body):
+        if method == "POST":
+            return 401, {"www-authenticate": f'Bearer resource_metadata="{target.replace("/mcp", "/.well-known/oauth-protected-resource/mcp")}"'}, b""
+        if "oauth-protected-resource" in target:
+            return 200, {}, json.dumps({"resource": "https://srv.example/mcp", "authorization_servers": servers}).encode()
+        return 405, {}, b""
+
+    assert statuses(check("https://srv.example/mcp", request=odd))["Authorization server named"] == "FAIL"
+
+
 def test_an_unreachable_server_fails_cleanly():
     results = check("http://127.0.0.1:9/mcp")
     assert statuses(results)["Server reachable"] == "FAIL"

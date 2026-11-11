@@ -9,6 +9,7 @@ read from them. Only the standard library; nothing is changed on the server.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -21,6 +22,8 @@ from urllib.parse import urlsplit, urlunsplit
 PROTOCOL = "2025-11-25"
 USER_AGENT = "sett-mcp-check"
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+# What a dropped, reset or timed-out connection raises.
+TRANSPORT_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
 MAX_PAGES = 50  # of tools/list
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -86,10 +89,17 @@ def normalize(url: str) -> str:
 
 def check(url: str, *, token: str | None = None, request: Request = http_request) -> list[Result]:
     url = normalize(url)
+    results: list[Result] = []
+    try:
+        _check(url, token, request, results.append)
+    except TRANSPORT_ERRORS as exc:  # after the first answer: report what was found so far
+        results.append(Result("FAIL", "Connection", f"Lost partway through the checks: {exc}", "Run the check again; if it keeps happening, the server's logs say why"))
+    return results
+
+
+def _check(url: str, token: str | None, request: Request, add: Callable[[Result], None]) -> None:
     parts = urlsplit(url)
     loopback = parts.hostname in LOOPBACK
-    results: list[Result] = []
-    add = results.append
 
     if parts.scheme == "https":
         add(Result("PASS", "Uses HTTPS"))
@@ -103,9 +113,9 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
 
     try:
         status, headers, body = _post(request, url, _initialize(), None)
-    except (urllib.error.URLError, OSError) as exc:
+    except TRANSPORT_ERRORS as exc:
         add(Result("FAIL", "Server reachable", str(exc), "Check the address, and that the server is running"))
-        return results
+        return
 
     session: dict[str, str] = {}
     if status == 401:
@@ -114,7 +124,7 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
         if not token:
             _check_get(url, request, None, add)
             add(Result("INFO", "Tools not checked", "Add --token - to check them too (it asks for an access token)"))
-            return results
+            return
     elif status == 200:
         if loopback:
             add(Result("INFO", "No sign-in required", "Fine on this machine"))
@@ -123,24 +133,23 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
     elif 300 <= status < 400:
         where = headers.get("location", "somewhere else")
         add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} redirects (HTTP {status}) to {where}", "Give clients the final address: they don't follow redirects with requests and tokens"))
-        return results
+        return
     else:
         add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} answered HTTP {status}: {_snippet(body)}", "Is this the MCP endpoint? Most servers answer at /mcp"))
-        return results
+        return
 
     if token:  # a session of its own, so the tools are listed as the token's user sees them
         status, headers, body = _post(request, url, _initialize(), token)
         if status != 200:
             add(Result("FAIL", "Token accepted", f"HTTP {status}", "The token may be expired, or issued for another server (its audience must be this URL)"))
-            return results
+            return
         add(Result("PASS", "Token accepted"))
 
-    message = _message(headers, body)
-    info = (message or {}).get("result", {})
+    info = _dict((_message(headers, body) or {}).get("result"))
     if not info.get("protocolVersion"):
         add(Result("FAIL", "Initialize", _snippet(body), "The server didn't return an MCP initialize result"))
-        return results
-    server = info.get("serverInfo", {})
+        return
+    server = _dict(info.get("serverInfo"))
     name = " ".join(str(v) for v in (server.get("name"), server.get("version")) if v) or "unnamed server"
     add(Result("PASS", "Initialize", f"{name}, protocol {info['protocolVersion']}"))
     if headers.get("mcp-session-id"):
@@ -151,7 +160,7 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
     _check_get(url, request, token, add)
     _check_origin(url, request, token, session, add)
     _check_tools(url, request, token, session, add)
-    return results
+    return
 
 
 def _initialize() -> dict[str, Any]:
@@ -197,7 +206,7 @@ def _snippet(body: bytes) -> str:
 def _json(request: Request, url: str) -> dict[str, Any] | None:
     try:
         status, _, body = request("GET", url, {"Accept": "application/json"}, None)
-    except (urllib.error.URLError, OSError):
+    except TRANSPORT_ERRORS:
         return None
     if status != 200:
         return None
@@ -227,11 +236,11 @@ def _check_sign_in(url: str, headers: Mapping[str, str], request: Request, add: 
         add(Result("PASS", "Protected resource metadata", f"resource = {resource}"))
     else:
         add(Result("FAIL", "Protected resource metadata", f"resource is {resource or 'missing'}, but clients connect to {url}", "Tokens are issued for the resource URL; it must be the address clients use (Sett: <PREFIX>_PUBLIC_URL)"))
-    servers = metadata.get("authorization_servers") or []
-    if not servers:
-        add(Result("FAIL", "Authorization server named", "authorization_servers is empty", "List the issuer clients sign in with"))
+    servers = metadata.get("authorization_servers")
+    if not isinstance(servers, list) or not servers or not isinstance(servers[0], str):
+        add(Result("FAIL", "Authorization server named", "authorization_servers is missing, empty or not a list of addresses", "List the issuer clients sign in with"))
         return
-    _check_authorization_server(str(servers[0]), request, add)
+    _check_authorization_server(servers[0], request, add)
 
 
 def _check_authorization_server(issuer: str, request: Request, add: Callable[[Result], None]) -> None:
@@ -260,7 +269,8 @@ def _check_authorization_server(issuer: str, request: Request, add: Callable[[Re
         add(Result("WARN", "Authorization server metadata", f"issuer {named} and {issuer} differ by a trailing slash", "Strict clients compare them exactly; make them identical"))
     else:
         add(Result("PASS", "Authorization server metadata", issuer))
-    if "S256" in (metadata.get("code_challenge_methods_supported") or []):
+    methods = metadata.get("code_challenge_methods_supported")
+    if isinstance(methods, list) and "S256" in methods:
         add(Result("PASS", "PKCE (S256)"))
     else:
         add(Result("FAIL", "PKCE (S256)", "code_challenge_methods_supported doesn't list S256", "MCP clients require PKCE and may refuse to sign in"))
@@ -286,7 +296,7 @@ def _check_get(url: str, request: Request, token: str | None, add: Callable[[Res
         headers["Authorization"] = f"Bearer {token}"
     try:
         status, response, _ = request("GET", url, headers, None)
-    except (urllib.error.URLError, OSError) as exc:
+    except TRANSPORT_ERRORS as exc:
         add(Result("WARN", "GET on the endpoint", f"No answer ({exc})", "Answer GET with 405, or with an event stream, so clients don't wait"))
         return
     if status == 405:
@@ -314,7 +324,7 @@ def _check_tools(url: str, request: Request, token: str | None, session: Mapping
     for page in range(MAX_PAGES):
         params = {"cursor": cursor} if cursor else {}
         status, headers, body = _post(request, url, {"jsonrpc": "2.0", "id": 3 + page, "method": "tools/list", "params": params}, token, session)
-        result = (_message(headers, body) or {}).get("result") or {}
+        result = _dict((_message(headers, body) or {}).get("result"))
         if status != 200 or not isinstance(result.get("tools"), list):
             add(Result("FAIL", "Lists tools", f"HTTP {status}: {_snippet(body)}" + (f" (page {page + 1})" if page else "")))
             return
@@ -324,8 +334,11 @@ def _check_tools(url: str, request: Request, token: str | None, session: Mapping
             break
     else:
         add(Result("WARN", "Lists tools", f"Stopped after {MAX_PAGES} pages; only those tools were checked", "A nextCursor that never runs out makes clients loop too"))
-    tools = [t for t in tools if isinstance(t, dict)]
     add(Result("PASS", "Lists tools", f"{len(tools)} tool{'s' if len(tools) != 1 else ''}"))
+    malformed = [_label(t, i) for i, t in enumerate(tools) if _schema_problem(t)]
+    if malformed:
+        add(Result("FAIL", "Tool definitions", f"Malformed: {', '.join(malformed)}", "Each tool needs an object inputSchema whose properties is an object; clients may drop or reject these tools"))
+    tools = [t for t in tools if not _schema_problem(t)]
     bad_names = [t.get("name") for t in tools if not TOOL_NAME.match(str(t.get("name", "")))]
     if bad_names:
         add(Result("FAIL", "Tool names", ", ".join(map(str, bad_names)), "Use 1-64 letters, digits, _ or -; some clients reject other names"))
@@ -337,7 +350,7 @@ def _check_tools(url: str, request: Request, token: str | None, session: Mapping
     undescribed = sorted(
         f"{t.get('name')}.{name}"
         for t in tools
-        for name, schema in ((t.get("inputSchema") or {}).get("properties") or {}).items()
+        for name, schema in (t["inputSchema"].get("properties") or {}).items()
         if isinstance(schema, dict) and not schema.get("description")
     )
     if undescribed:
@@ -345,11 +358,28 @@ def _check_tools(url: str, request: Request, token: str | None, session: Mapping
         add(Result("WARN", "Parameter descriptions", f"Missing: {shown}", "Describe each parameter: its format, an example, its limits"))
     else:
         add(Result("PASS", "Parameter descriptions"))
-    unhinted = [t.get("name") for t in tools if not any(k in (t.get("annotations") or {}) for k in ("readOnlyHint", "destructiveHint"))]
+    unhinted = [t.get("name") for t in tools if not any(k in _dict(t.get("annotations")) for k in ("readOnlyHint", "destructiveHint"))]
     if unhinted:
         add(Result("WARN", "Read-only and destructive hints", f"None on: {', '.join(map(str, unhinted))}", "Clients use readOnlyHint and destructiveHint to decide when to ask the user first"))
     else:
         add(Result("PASS", "Read-only and destructive hints"))
+
+
+def _dict(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _schema_problem(tool: object) -> bool:
+    """True when a tool entry isn't an object, or its inputSchema or properties isn't one."""
+    if not isinstance(tool, dict):
+        return True
+    schema = tool.get("inputSchema")
+    return not isinstance(schema, dict) or not isinstance(schema.get("properties", {}), dict) or not isinstance(tool.get("annotations", {}), dict)
+
+
+def _label(tool: object, index: int) -> str:
+    name = tool.get("name") if isinstance(tool, dict) else None
+    return str(name) if name else f"tool #{index + 1}"
 
 
 def report(results: list[Result], say: Callable[[str], None] = print) -> int:
