@@ -1,0 +1,20 @@
+# Adds labels to pull requests from the files they change (rules in .github/labeler.yml),
+# so "Generate release notes" groups them. It only reads the PR's file list; it never
+# checks out or runs the PR's code.
+name: Label pull requests
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v7
+        with:
+          sync-labels: true  # take a label off again when a later push no longer touches its files

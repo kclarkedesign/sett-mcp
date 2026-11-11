@@ -67,7 +67,7 @@ uv run my-server users add you@example.com --writer
 uvx sett-mcp check https://<your-project>.vercel.app/mcp   # test it the way clients will
 ```
 
-Copier asks for a name, tool prefix and environment-variable prefix. Everything else is filled in. New to this? [docs/getting-started.md](docs/getting-started.md) walks through it from installing uv, on Windows and macOS.
+Copier asks for a name, tool prefix and environment-variable prefix. Everything else is filled in. New to this? [docs/getting-started.md](docs/getting-started.md) walks through it from installing uv, on Windows and macOS. Stuck, or have a question? Ask in [Discussions](https://github.com/kclarkedesign/sett-mcp/discussions/categories/q-a).
 
 Adding a tool looks like this:
 
@@ -127,7 +127,7 @@ SDK v2 renamed `FastMCP` to `MCPServer` and changed a dozen other things. See [d
 
 ## Contributing
 
-Issues and pull requests are welcome. To work on the template itself:
+Questions, ideas and servers you've built go in [Discussions](https://github.com/kclarkedesign/sett-mcp/discussions); bugs and concrete feature requests in [issues](https://github.com/kclarkedesign/sett-mcp/issues). Pull requests are welcome. To work on the template itself:
 
 ```bash
 uvx copier copy --trust --defaults --vcs-ref HEAD . /tmp/check
