@@ -31,11 +31,20 @@ Issues = "https://github.com/kclarkedesign/sett-mcp/issues"
 dev = ["pytest>=8"]
 
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling>=1.27", "hatch-vcs>=0.4"]
 build-backend = "hatchling.build"
 
+# The version comes from the git tag (v0.3.3 -> 0.3.3), so a release needs no version bump:
+# create the GitHub release and the publish workflow builds that version.
 [tool.hatch.version]
-path = "src/sett_mcp/__init__.py"
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"  # PyPI refuses "+local" versions
+# Only this package's tags (v0.3.3), so another package released from this repo with its
+# own tags (sett-fastmcp-v0.1.0) can't set sett-mcp's version.
+tag_regex = '^v(?P<version>\d+(?:\.\d+)*(?:[-.]?(?:a|b|rc)\d+)?)$'
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sett_mcp"]

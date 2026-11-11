@@ -1,0 +1,17 @@
+# Groups for GitHub's "Generate release notes" button, by PR label.
+# Labels are added automatically from the files a PR changes (.github/labeler.yml).
+# A PR goes in the first group whose label it has, so code changes win over "ci".
+changelog:
+  categories:
+    - title: Remote deploy
+      labels: [deploy]
+    - title: Clients and install
+      labels: [install]
+    - title: Guardrails
+      labels: [guardrails]
+    - title: Docs
+      labels: [docs]
+    - title: Maintenance
+      labels: [ci]
+    - title: Other changes
+      labels: ["*"]
