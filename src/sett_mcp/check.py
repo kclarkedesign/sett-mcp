@@ -35,10 +35,37 @@ class Result:
     fix: str = ""
 
 
+def _origin(url: str) -> tuple[str, str]:
+    parts = urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+class _SafeRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only when it can't leak the token or change what's being checked.
+
+    A POST isn't followed at all (the 3xx is reported instead), a redirect from https to
+    http isn't followed, and a request carrying a token is only followed on the same origin:
+    urllib would otherwise copy the Authorization header to wherever the server points.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if req.get_method() == "POST":
+            return None
+        old, new = _origin(req.full_url), _origin(newurl)
+        if old[0] == "https" and new[0] != "https":
+            return None
+        if new != old and (req.has_header("Authorization") or "Authorization" in req.unredirected_hdrs):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_SafeRedirects)
+
+
 def http_request(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> tuple[int, Mapping[str, str], bytes]:
     request = urllib.request.Request(url, data=body, method=method, headers={"User-Agent": USER_AGENT, **headers})
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310 (the URL being checked)
+        with _opener.open(request, timeout=15) as response:  # the URL being checked
             # A GET may open an event stream that never ends: read the headers, not the body.
             raw = b"" if response.headers.get("content-type", "").startswith("text/event-stream") and method == "GET" else response.read()
             return response.status, {k.lower(): v for k, v in response.headers.items()}, raw
@@ -80,13 +107,7 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
     if status == 401:
         add(Result("PASS", "Requires sign-in", "Requests without a token get 401"))
         _check_sign_in(url, headers, request, add)
-        if token:
-            status, headers, body = _post(request, url, _initialize(), token)
-            if status != 200:
-                add(Result("FAIL", "Token accepted", f"HTTP {status}", "The token may be expired, or issued for another server (its audience must be this URL)"))
-                return results
-            add(Result("PASS", "Token accepted"))
-        else:
+        if not token:
             _check_get(url, request, None, add)
             add(Result("INFO", "Tools not checked", "Add --token - to check them too (it asks for an access token)"))
             return results
@@ -95,9 +116,20 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
             add(Result("INFO", "No sign-in required", "Fine on this machine"))
         else:
             add(Result("WARN", "No sign-in required", "Anyone who finds this address can call its tools", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
+    elif 300 <= status < 400:
+        where = headers.get("location", "somewhere else")
+        add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} redirects (HTTP {status}) to {where}", "Give clients the final address: they don't follow redirects with requests and tokens"))
+        return results
     else:
         add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} answered HTTP {status}: {_snippet(body)}", "Is this the MCP endpoint? Most servers answer at /mcp"))
         return results
+
+    if token:  # a session of its own, so the tools are listed as the token's user sees them
+        status, headers, body = _post(request, url, _initialize(), token)
+        if status != 200:
+            add(Result("FAIL", "Token accepted", f"HTTP {status}", "The token may be expired, or issued for another server (its audience must be this URL)"))
+            return results
+        add(Result("PASS", "Token accepted"))
 
     message = _message(headers, body)
     info = (message or {}).get("result", {})
@@ -211,17 +243,37 @@ def _check_authorization_server(issuer: str, request: Request, add: Callable[[Re
     if metadata is None:
         add(Result("FAIL", "Authorization server metadata", f"None found for {issuer}", "Clients read it to find where to sign in"))
         return
-    add(Result("PASS", "Authorization server metadata", issuer))
+    problems = []
+    named = str(metadata.get("issuer") or "")
+    if named.rstrip("/") != issuer.rstrip("/"):
+        problems.append(f"issuer is {named or 'missing'}, expected {issuer}")
+    for key in ("authorization_endpoint", "token_endpoint"):
+        if not _usable(metadata.get(key)):
+            problems.append(f"{key} is {metadata.get(key) or 'missing'}, not an https address")
+    if problems:
+        add(Result("FAIL", "Authorization server metadata", "; ".join(problems), "Clients check these before signing in, and stop if they're wrong (RFC 8414)"))
+    elif named != issuer:
+        add(Result("WARN", "Authorization server metadata", f"issuer {named} and {issuer} differ by a trailing slash", "Strict clients compare them exactly; make them identical"))
+    else:
+        add(Result("PASS", "Authorization server metadata", issuer))
     if "S256" in (metadata.get("code_challenge_methods_supported") or []):
         add(Result("PASS", "PKCE (S256)"))
     else:
         add(Result("FAIL", "PKCE (S256)", "code_challenge_methods_supported doesn't list S256", "MCP clients require PKCE and may refuse to sign in"))
-    if metadata.get("registration_endpoint"):
+    if _usable(metadata.get("registration_endpoint")):
         add(Result("PASS", "Clients can register themselves", "Dynamic client registration"))
     elif metadata.get("client_id_metadata_document_supported"):
         add(Result("PASS", "Clients can register themselves", "Client ID metadata documents"))
     else:
         add(Result("WARN", "Clients can register themselves", "No registration_endpoint and no client ID metadata documents", "Each client must then be registered by hand; Claude and Cursor expect to register themselves"))
+
+
+def _usable(endpoint: object) -> bool:
+    """An absolute https address (plain http only on this machine)."""
+    if not isinstance(endpoint, str):
+        return False
+    parts = urlsplit(endpoint)
+    return bool(parts.netloc) and (parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in LOOPBACK))
 
 
 def _check_get(url: str, request: Request, token: str | None, add: Callable[[Result], None]) -> None:

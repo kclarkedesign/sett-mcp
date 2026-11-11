@@ -23,7 +23,7 @@ TOOLS = [
 
 def serve(**options):
     """A fake MCP server; `options` switch its behaviour."""
-    state = {"origins": []}
+    state = {"origins": [], "authorizations": [], "sessions": []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -42,15 +42,19 @@ def serve(**options):
 
         def do_GET(self):
             base = f"http://127.0.0.1:{self.server.server_port}"
+            state["authorizations"].append(self.headers.get("Authorization"))
+            if options.get("redirect_to"):
+                return self.reply(302, b"", [("Location", options["redirect_to"])])
             if self.path == "/.well-known/oauth-protected-resource/mcp":
                 return self.json({"resource": options.get("resource", f"{base}/mcp"), "authorization_servers": [f"{base}/auth/v1"]})
             if self.path == "/.well-known/oauth-authorization-server/auth/v1":
-                meta = {"issuer": f"{base}/auth/v1", "authorization_endpoint": "x", "token_endpoint": "y"}
+                meta = {"issuer": f"{base}/auth/v1", "authorization_endpoint": f"{base}/auth/v1/oauth/authorize", "token_endpoint": f"{base}/auth/v1/oauth/token"}
                 if not options.get("no_pkce"):
                     meta["code_challenge_methods_supported"] = ["S256"]
                 if not options.get("no_dcr"):
                     meta["registration_endpoint"] = f"{base}/auth/v1/register"
-                return self.json(meta)
+                meta.update(options.get("metadata", {}))
+                return self.json({k: v for k, v in meta.items() if v is not None})
             if self.path == "/mcp":
                 return self.reply(405, b"", [("Allow", "POST")])
             return self.reply(404)
@@ -59,6 +63,9 @@ def serve(**options):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if self.path != "/mcp":
                 return self.reply(404)
+            state["authorizations"].append(self.headers.get("Authorization"))
+            if options.get("redirect_to"):
+                return self.reply(307, b"", [("Location", options["redirect_to"])])
             if options.get("auth") and self.headers.get("Authorization") != "Bearer good":
                 challenge = 'Bearer error="invalid_token"'
                 if not options.get("no_challenge_link"):
@@ -72,8 +79,10 @@ def serve(**options):
             method = body.get("method")
             if method == "initialize":
                 result = {"protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "acme", "version": "1"}}
-                return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result}, headers=[("Mcp-Session-Id", "s1")])
+                session = "signed-in" if self.headers.get("Authorization") else "anonymous"
+                return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result}, headers=[("Mcp-Session-Id", session)])
             if method == "tools/list":
+                state["sessions"].append(self.headers.get("Mcp-Session-Id"))
                 tools = options.get("tools", TOOLS)
                 if options.get("sse"):
                     data = f"event: message\ndata: {json.dumps({'jsonrpc': '2.0', 'id': body['id'], 'result': {'tools': tools}})}\n\n"
@@ -160,6 +169,57 @@ def test_thin_tools_and_any_origin_warn(server):
     assert results["Tool names"] == "FAIL"
     assert results["Tool descriptions"] == "WARN" and results["Parameter descriptions"] == "WARN"
     assert results["Read-only and destructive hints"] == "WARN" and results["Refuses other websites"] == "WARN"
+
+
+def test_a_token_gets_its_own_session_on_a_server_that_also_allows_anonymous_use(server):
+    url, state = server()
+    results = statuses(check(url, token="good"))
+    assert results["Token accepted"] == "PASS" and results["Lists tools"] == "PASS"
+    assert state["sessions"] == ["signed-in"]
+
+
+def test_a_redirect_never_carries_the_token_to_another_origin(server):
+    target, target_state = server()
+    url, _ = server(redirect_to=target.replace("/mcp", "/elsewhere"))
+    status, headers, _ = check_module.http_request("GET", url, {"Authorization": "Bearer good"}, None)
+    assert status == 302 and headers["location"].endswith("/elsewhere")
+    assert target_state["authorizations"] == []
+
+
+def test_a_redirect_without_a_token_is_followed(server):
+    target, target_state = server()
+    url, _ = server(redirect_to=target.replace("/mcp", "/.well-known/oauth-protected-resource/mcp"))
+    status, _, body = check_module.http_request("GET", url, {}, None)
+    assert status == 200 and b"authorization_servers" in body and target_state["authorizations"] == [None]
+
+
+def test_an_endpoint_that_redirects_posts_fails_and_the_token_stays_put(server):
+    target, target_state = server()
+    url, _ = server(redirect_to=target)
+    results = check(url, token="good")
+    result = next(r for r in results if r.name == "Answers MCP requests")
+    assert result.status == "FAIL" and target in result.detail
+    assert target_state["authorizations"] == []
+    assert "Token accepted" not in statuses(results)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"issuer": "https://someone-else.example/auth/v1"},
+        {"token_endpoint": None},
+        {"authorization_endpoint": "/oauth/authorize"},
+        {"token_endpoint": "http://plain.example/token"},
+    ],
+)
+def test_unusable_authorization_server_metadata_fails(server, metadata):
+    url, _ = server(auth=True, metadata=metadata)
+    assert statuses(check(url))["Authorization server metadata"] == "FAIL"
+
+
+def test_a_relative_registration_endpoint_does_not_count(server):
+    url, _ = server(auth=True, metadata={"registration_endpoint": "/register"})
+    assert statuses(check(url))["Clients can register themselves"] == "WARN"
 
 
 def test_an_unreachable_server_fails_cleanly():
