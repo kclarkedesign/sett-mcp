@@ -201,7 +201,7 @@ def _read_events(response: Any, id_: object) -> bytes:
         elif not text and data:
             message = _json_object("\n".join(data))
             data = []
-            if message is not None and message.get("id") == id_ and ("result" in message or "error" in message):
+            if _is_reply(message, id_):
                 break
     return b"".join(kept)
 
@@ -239,7 +239,7 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
         results.append(Result("FAIL", "Address", f"{url} isn't a usable address", "Give the server's full address, e.g. https://my-server.vercel.app/mcp"))
     except TRANSPORT_ERRORS as exc:  # after the first answer: report what was found so far
         results.append(Result("FAIL", "Connection", f"Lost partway through the checks: {exc}", _transport_fix(exc)))
-    if secret and len(secret) >= 8:  # never print the token, whatever the server echoed back (real ones are long)
+    if secret:  # never print the token, whatever the server echoed back
         for r in results:
             r.detail, r.fix = r.detail.replace(secret, "[token]"), r.fix.replace(secret, "[token]")
     return results
@@ -305,7 +305,7 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     handshake_problems = _handshake_problems(info, h_headers) if info else []
     handshake_ok = h_status == 200 and bool(info) and not handshake_problems
 
-    if not token and 401 in (m_status, h_status):  # one of them is public, the other needs sign-in
+    if not token and 401 in (m_status, h_status) and not (modern_ok or handshake_ok):
         _requires_sign_in(url, h_headers if h_status == 401 else m_headers, request, add, "Some requests are public, but this one needs a token", not_checked)
         return
     if not (modern_ok or handshake_ok or discovered or info):
@@ -316,7 +316,9 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
             add(Result("FAIL", "Answers MCP requests", f"server/discover: {_why(m_status, m_headers, m_body)}; initialize: {_why(h_status, h_headers, h_body)}", "The server didn't return an MCP result for either protocol version"))
         return
 
-    if modern_ok:
+    if not token and m_status == 401:
+        add(Result("INFO", f"Protocol {MODERN}", "Asks for a token; the handshake doesn't, so its tools decide"))
+    elif modern_ok:
         add(Result("PASS", f"Protocol {MODERN}", _server_name(_dict(_dict(discovered.get("_meta")).get("io.modelcontextprotocol/serverInfo")))))
     elif discovered:
         add(Result("FAIL", f"Protocol {MODERN}", f"server/discover is missing or has wrong {', '.join(modern_problems)}", f"Current clients choose {MODERN} and then reject this reply; update the server's MCP SDK"))
@@ -330,6 +332,8 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, token, handshake_era.headers)
     elif info:
         add(Result("FAIL", "Handshake protocol", "; ".join(handshake_problems), "Clients on the handshake reject this initialize result"))
+    elif not token and h_status == 401:
+        add(Result("INFO", "Handshake protocol", f"Asks for a token; {MODERN} doesn't, so its tools decide"))
     else:
         add(Result("WARN", "Handshake protocol", f"initialize answered {_why(h_status, h_headers, h_body)}", f"Clients that haven't moved to {MODERN} can't connect; serve both (the MCP Python SDK does by default)"))
     if not (modern_ok or handshake_ok):
@@ -344,6 +348,10 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         else:  # discovery is public, the tools aren't: that's sign-in working
             _requires_sign_in(url, tools_headers, request, add, "Discovery is public; tools/list needs a token", not_checked)
         return
+    if tools_status == 200 and modern_ok and handshake_ok:
+        problem = _handshake_tools(url, request, token, handshake_era)
+        if problem:
+            add(Result("FAIL", "Tools over the handshake", problem, f"Clients still on the handshake can't use the tools, though {MODERN} clients can"))
     if tools_status == 200:
         if token and open_first:
             _check_open_with_token(url, request, era, handshake_ok, loopback, add)
@@ -355,6 +363,22 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
             add(Result("WARN", "No sign-in required", "Anyone who finds this address can list and call its tools", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
     _check_get(url, request, token, get_headers, add)
     _check_origin(url, request, token, era, add)
+
+
+def _handshake_tools(url: str, request: Request, token: str | None, era: _Era) -> str:
+    """Why tools/list over the handshake session fails, or "" when it works."""
+    cursor = None
+    for page in range(MAX_PAGES):
+        status, headers, body = _call(request, url, token, era, "tools/list", 60 + page, {"cursor": cursor} if cursor else {})
+        result = _dict((_message(headers, body, 60 + page) or {}).get("result"))
+        if status != 200 or not isinstance(result.get("tools"), list):
+            return _why(status, headers, body)
+        cursor = result.get("nextCursor")
+        if cursor is not None and not isinstance(cursor, str):
+            return "nextCursor isn't text"
+        if not cursor:
+            return ""
+    return ""
 
 
 def _check_open_with_token(url: str, request: Request, era: _Era, handshake_ok: bool, loopback: bool, add: Callable[[Result], None]) -> None:
@@ -369,6 +393,7 @@ def _check_open_with_token(url: str, request: Request, era: _Era, handshake_ok: 
         if headers.get("mcp-session-id"):
             anonymous.headers["mcp-session-id"] = headers["mcp-session-id"]
         anonymous.headers["mcp-protocol-version"] = str(info["protocolVersion"])
+        _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, None, anonymous.headers)
     status, headers, body = _call(request, url, None, anonymous, "tools/list", 90)
     if status == 200 and isinstance(_dict((_message(headers, body, 90) or {}).get("result")).get("tools"), list):
         add(Result("INFO", "Token not needed", "The tools list without a token as well"))
@@ -456,13 +481,18 @@ def _message(headers: Mapping[str, str], body: bytes, id_: int) -> dict[str, Any
             elif not line and data:
                 message = _json_object("\n".join(data))
                 data = []
-                if message is not None and ("result" in message or "error" in message) and message.get("id") == id_:
+                if _is_reply(message, id_):
                     return message
         return None
     if not kind.startswith("application/json"):
         return None
     message = _json_object(text)
-    return message if message is not None and message.get("id") == id_ else None
+    return message if _is_reply(message, id_) else None
+
+
+def _is_reply(message: dict[str, Any] | None, id_: object) -> bool:
+    """A JSON-RPC 2.0 reply to request `id_`: the version, the id, and exactly one of result or error."""
+    return message is not None and message.get("jsonrpc") == "2.0" and message.get("id") == id_ and ("result" in message) != ("error" in message)
 
 
 def _json_object(text: str | bytes) -> dict[str, Any] | None:
@@ -716,6 +746,9 @@ def _check_tools(url: str, request: Request, token: str | None, era: _Era, add: 
             return status, headers
         tools += result["tools"]
         cursor = result.get("nextCursor")
+        if cursor is not None and not isinstance(cursor, str):
+            add(Result("FAIL", "Lists tools", f"nextCursor is {json.dumps(cursor)[:40]}, not text" + (f" (page {page + 1})" if page else ""), "Clients send nextCursor back as text to get the next page; send a string, or leave it out on the last page"))
+            return status, headers
         if not cursor:
             break
     else:

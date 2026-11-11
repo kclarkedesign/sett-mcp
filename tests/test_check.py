@@ -24,7 +24,7 @@ TOOLS = [
 
 def serve(**options):
     """A fake MCP server; `options` switch its behaviour."""
-    state = {"origins": [], "authorizations": [], "sessions": []}
+    state = {"origins": [], "authorizations": [], "sessions": [], "initialized": set()}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -128,6 +128,13 @@ def serve(**options):
                 result = {"protocolVersion": options.get("handshake_version", "2025-11-25"), "capabilities": {}, "serverInfo": {"name": "acme", "version": "1"}}
                 session = "signed-in" if self.headers.get("Authorization") else "anonymous"
                 return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result}, headers=[("Mcp-Session-Id", session)])
+            if method == "notifications/initialized":
+                state["initialized"].add(self.headers.get("Mcp-Session-Id"))
+            if method == "tools/list" and not modern:
+                if options.get("handshake_tools_broken"):
+                    return self.json({"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32600, "message": "Bad session"}}, 400)
+                if options.get("strict_lifecycle") and self.headers.get("Mcp-Session-Id") not in state["initialized"]:
+                    return self.json({"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32600, "message": "Not initialized"}}, 400)
             if method == "tools/list":
                 state["sessions"].append(self.headers.get("Mcp-Session-Id"))
                 tools = options.get("tools", TOOLS)
@@ -136,9 +143,11 @@ def serve(**options):
                     pages = options["pages"]
                     result = {"tools": pages[index]}
                     if index + 1 < len(pages):
-                        result["nextCursor"] = str(index + 1)
+                        result["nextCursor"] = options.get("cursor", str(index + 1))
                     return self.json({"jsonrpc": "2.0", "id": body["id"], "result": self.finish_result(result, modern)})
                 reply = {"jsonrpc": "2.0", "id": body["id"], "result": self.finish_result({"tools": tools}, modern)}
+                if options.get("no_jsonrpc"):
+                    reply.pop("jsonrpc")
                 if options.get("sse_open"):
                     return self.stream_open(reply)
                 if options.get("sse"):  # pretty-printed across several data: lines, which SSE joins
@@ -308,7 +317,7 @@ def test_every_page_of_tools_is_checked(server):
     url, state = server(pages=[TOOLS, [bad]])
     results = check(url)
     lists = next(r for r in results if r.name == "Lists tools")
-    assert lists.detail == "2 tools" and len(state["sessions"]) == 2
+    assert lists.detail == "2 tools" and len(state["sessions"]) == 4  # both pages, over both protocols
     assert statuses(results)["Tool descriptions"] == "WARN"
 
 
@@ -819,3 +828,47 @@ def test_a_real_sdk_server_with_sign_in(server):
     assert named["Token accepted"] == "PASS" and named["Lists tools"] == "PASS"
     assert not [r for r in signed_in if r.status == "FAIL"], [r for r in signed_in if r.status == "FAIL"]
     assert rejected["Token accepted"] == "FAIL"
+
+
+# --- Codex, after the review fixes ----------------------------------------------------
+
+
+def test_public_tools_over_2026_are_found_when_only_the_handshake_needs_a_token(server, monkeypatch):
+    url, _ = server(auth=True, public={"server/discover", "tools/list", "ping"})
+    monkeypatch.setattr(check_module, "LOOPBACK", set())
+    results = statuses(check(url))
+    assert results["No sign-in required"] == "WARN" and "Requires sign-in" not in results
+    assert results["Handshake protocol"] == "INFO"
+
+
+def test_a_short_token_is_redacted_too():
+    def echo(method, target, headers, body):
+        return 500, {"content-type": "text/plain"}, f"bad token {headers.get('Authorization', '')}".encode()
+
+    lines = []
+    report(check("https://srv.example/mcp", token="k9Zq", request=echo), lines.append)
+    assert not any("k9Zq" in line for line in lines)
+
+
+def test_tools_over_the_handshake_are_checked_when_both_protocols_are_offered(server):
+    url, _ = server(handshake_tools_broken=True)
+    results = statuses(check(url))
+    assert results["Lists tools"] == "PASS" and results["Tools over the handshake"] == "FAIL"
+
+
+def test_the_anonymous_handshake_session_is_completed_before_listing_tools(server):
+    url, _ = server(era="legacy", strict_lifecycle=True)
+    results = statuses(check(url, token="anything-at-all"))
+    assert results["Token not needed"] == "INFO" and "Token accepted" not in results
+
+
+def test_a_reply_without_jsonrpc_2_0_is_not_accepted(server):
+    url, _ = server(no_jsonrpc=True)
+    assert statuses(check(url))["Lists tools"] == "FAIL"
+
+
+@pytest.mark.parametrize("cursor", [[], 2, {"page": 2}])
+def test_a_cursor_that_is_not_text_fails(server, cursor):
+    url, _ = server(pages=[TOOLS, TOOLS], cursor=cursor)
+    result = next(r for r in check(url) if r.name == "Lists tools")
+    assert result.status == "FAIL" and "nextCursor" in result.detail
