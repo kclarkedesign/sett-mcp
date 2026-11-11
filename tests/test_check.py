@@ -71,6 +71,10 @@ def serve(**options):
             prm_path = "/.well-known/oauth-protected-resource" + ("" if options.get("prm_root_only") else "/mcp")
             if self.path == prm_path:
                 resource = base if options.get("resource_parent") else options.get("resource", f"{base}/mcp")
+                if options.get("resource_upper"):
+                    resource = f"{base}/MCP"
+                if options.get("resource_host_upper"):
+                    resource = f"HTTP://127.0.0.1:{self.server.server_port}/mcp"  # the scheme ignores case, like the host
                 return self.json({"resource": resource, "authorization_servers": [options.get("issuer", f"{base}/auth/v1")]})
             as_path = "/auth/v1/.well-known/oauth-authorization-server" if options.get("as_appended_only") else "/.well-known/oauth-authorization-server/auth/v1"
             if options.get("as_5xx") and self.path == "/.well-known/oauth-authorization-server/auth/v1":
@@ -872,3 +876,20 @@ def test_a_cursor_that_is_not_text_fails(server, cursor):
     url, _ = server(pages=[TOOLS, TOOLS], cursor=cursor)
     result = next(r for r in check(url) if r.name == "Lists tools")
     assert result.status == "FAIL" and "nextCursor" in result.detail
+
+
+def test_a_public_handshake_is_found_when_2026_asks_for_a_token(server, monkeypatch):
+    url, _ = server(auth=True, public={"initialize", "notifications/initialized", "tools/list", "ping"}, era="legacy")
+    monkeypatch.setattr(check_module, "LOOPBACK", set())
+    results = statuses(check(url))
+    assert results["No sign-in required"] == "WARN" and "Requires sign-in" not in results
+
+
+def test_a_resource_differing_only_in_path_case_fails(server):
+    url, _ = server(auth=True, resource_upper=True)
+    assert statuses(check(url))["Protected resource metadata"] == "FAIL"
+
+
+def test_a_resource_differing_only_in_scheme_case_passes(server):
+    url, _ = server(auth=True, resource_host_upper=True)
+    assert statuses(check(url))["Protected resource metadata"] == "PASS"

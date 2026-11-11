@@ -269,7 +269,12 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     modern_era, handshake_era = _Era(modern=True), _Era(modern=False)
     try:  # anonymously, as a client's first request: the current protocol first, then the handshake
         status, headers, body = _call(request, url, None, modern_era, "server/discover", 1)
-        if status != 401 and not 300 <= status < 400 and not _discovered(headers, body):
+        if status == 401:  # 2026-07-28 asks for a token; is the handshake public?
+            h_status, h_headers, h_body = _post(request, url, _initialize(), None)
+            info = _dict((_message(h_headers, h_body, 1) or {}).get("result"))
+            if h_status == 200 and info:  # it is: the tools decide, below
+                status, headers, body = h_status, h_headers, h_body
+        elif not 300 <= status < 400 and not _discovered(headers, body):
             status, headers, body = _post(request, url, _initialize(), None)
     except TRANSPORT_ERRORS as exc:
         add(Result("FAIL", "Server reachable", str(exc), _transport_fix(exc)))
@@ -587,6 +592,16 @@ def _usable(endpoint: object) -> bool:
     return bool(parts.netloc) and (parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK))
 
 
+def _same_resource(resource: str, url: str) -> bool:
+    """Equal as clients compare them: scheme and host ignore case, the path and query don't."""
+    try:
+        r, u = urlsplit(resource), urlsplit(url)
+    except ValueError:
+        return False
+    same_site = r.scheme.lower() == u.scheme.lower() and r.netloc.lower() == u.netloc.lower()
+    return same_site and r.path.rstrip("/") == u.path.rstrip("/") and r.query == u.query
+
+
 def resource_covers(resource: str, url: str) -> bool:
     """The SDK client's rule: same scheme and host, and the URL's path within the resource's."""
     try:
@@ -626,7 +641,7 @@ def _check_sign_in(url: str, headers: Mapping[str, str], request: Request, add: 
         add(Result("FAIL", "Protected resource metadata", f"Nothing usable at {' or '.join(dict.fromkeys(candidates))}", "Serve RFC 9728 metadata there, naming this URL and its authorization server"))
         return
     resource = metadata["resource"]
-    if resource.rstrip("/").lower() == url.rstrip("/").lower():
+    if _same_resource(resource, url):
         add(Result("PASS", "Protected resource metadata", f"resource = {resource}"))
     elif resource_covers(resource, url):
         add(Result("PASS", "Protected resource metadata", f"resource {resource} covers {url}"))
