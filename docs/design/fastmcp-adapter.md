@@ -37,7 +37,7 @@ Answers to section 10:
 | Question | Answer |
 |---|---|
 | **8a** Can middleware return `InputRequiredToolResult`? | Yes. The round trip completes with `Client(mode="auto")`: two middleware rounds, handler called once, the tool ran only after `accept`. `decline` and `cancel` ran nothing and reported distinct messages. The old protocol works from the same middleware. |
-| **8b** How to read client capabilities? | `ctx.session.client_capabilities`, on both eras (per request on 2026-07-28). Check `.elicitation is None` **up front** on both. Without it, a client with no handler fails safe but with its own raw `MCPError: Elicitation not supported` and no audit entry. |
+| **8b** How to read client capabilities? | `ctx.session.client_capabilities`, on both eras (per request on 2026-07-28). Check for *form* support **up front** on both (§4 has the exact test: presence of `elicitation` alone isn't enough, since a URL-only client has it set). Without a check, a client with no handler fails safe but with its own raw `MCPError: Elicitation not supported` and no audit entry. |
 | **8c** Empty form on the old protocol? | Don't use `ctx.elicit()`: an empty dataclass or model sends a top-level `title`, which Codex rejects. Use `await ctx.session.elicit_form(message, {"type": "object", "properties": {}})`. |
 | **8d** Does the SDK already bind the confirmation? | Yes: it seals `(tool, args digest, principal)` plus a TTL (600 s) and audience into `request_state`, and refuses a replay with other arguments. It does **not** refuse an accept that carries no state, so the middleware must require its marker. It does **not** make a state single-use either (risk 9). |
 
@@ -138,7 +138,7 @@ def acme_delete_contact(contact_id: str) -> dict: ...
   1. Look up the tool. If it is `None` or not visible, raise `NotFoundError` (the same "Unknown tool" answer).
   2. For writes: run the writer check (`writer_check(get_access_token())`), then the placeholder check. Both use shared refusal text.
   3. If confirmation is needed:
-     - **Capability check, both eras, before anything else:** read `ctx.session.client_capabilities`; if `.elicitation is None`, audit `blocked` and raise `ToolError` "can't carry a confirmation prompt". The spike showed that without this a modern client with no handler gets its own raw `MCPError` and no audit entry.
+     - **Capability check, both eras, before anything else:** read `ctx.session.client_capabilities` and test for *form* support: `e = caps.elicitation if caps else None`, then `e is not None and (e.form is not None or e.url is None)`. A client that declares only `url` can't show our form, while an empty `elicitation: {}` counts as form (the spec's backward-compatibility rule). If the test fails, audit `blocked` and raise `ToolError` "can't carry a confirmation prompt". Don't use the SDK's `check_client_capability` for this: it only checks that `elicitation` is present, so it lets a URL-only client through (`spikes/fastmcp-middleware/capabilities.py`). The spike showed that without any check a modern client with no handler gets its own raw `MCPError` and no audit entry.
      - **2026-07-28:** if `ctx.input_responses["sett_confirm"]` is present and `ctx.request_state == MARKER`, read its `action`. If responses arrive without the marker, refuse: that is a forged accept, and the SDK doesn't catch it. Otherwise return `InputRequiredToolResult(InputRequiredResult(input_requests={"sett_confirm": ElicitRequest(form, empty schema)}, request_state=MARKER))`. The asking round writes no audit entry, matching Sett.
      - **Older protocol:** send the form with `ctx.session.elicit_form(text, {"type": "object", "properties": {}})`, not `ctx.elicit(...)`, which adds a top-level `title` that Codex rejects (spike 8c).
      - Then: `accept` runs the tool, `decline` raises `ToolError` "declined", `cancel` raises "cancelled", each with an audit entry.
@@ -223,6 +223,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 10. `writer_check` with a `StaticTokenVerifier` token: a reader is `forbidden`, a writer is allowed, and the audit entry carries `subject` and `client_id`.
 11. `check(mcp)` raises on an unknown `confirm_message` placeholder.
 12. A genuine confirmation state used a second time: the SDK doesn't refuse it (spike 8d). Pin the documented behavior (open question 7): a state can be used again within its TTL.
+13. Capability matrix for the up-front check: no `elicitation` (blocked), `elicitation: {}` (allowed: form by the backward-compatibility rule), `form` only (allowed), `url` only (blocked), `form` and `url` (allowed). The predicate is already checked against the SDK's capability models in `spikes/fastmcp-middleware/capabilities.py`; the real test should also drive a URL-only client end to end, which the spike did not.
 
 **CI:**
 - matrix of Python 3.10/3.13 × fastmcp `4.1.*` (floor) and latest. fastmcp 4.1.8 and `mcp` 2.3.0 declare `Requires-Python >=3.10`, but the spike ran on 3.14 only
@@ -241,7 +242,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 7. **FastMCP's own auth.** Use FastMCP's providers. Sett's writer role becomes `writer_check(get_access_token())`. `require_roles` and `AuthMiddleware` can narrow per tool, but **nothing widens** `<PREFIX>_ENABLE_WRITES`. That invariant goes in the README and in a test.
 8. **Resolved by the spike (2026-11-11);** see "Spike results" above:
    - (a) Yes: a middleware-returned `InputRequiredToolResult` completes a round trip with `Client(mode="auto")`.
-   - (b) `ctx.session.client_capabilities`. A modern client with no handler shows `None`; if the server asks anyway, the client answers with its own `MCPError: Elicitation not supported`. So check up front.
+   - (b) `ctx.session.client_capabilities`. A modern client with no handler shows `None`; if the server asks anyway, the client answers with its own `MCPError: Elicitation not supported`. So check up front, for form support and not just presence (§4).
    - (c) `ctx.session.elicit_form` with a plain dict. An empty dataclass or model through `ctx.elicit` adds a `title`.
    - (d) Yes: tool, argument digest, principal, TTL (600 s) and audience, per [RequestStateSecurity][rss]. A constant marker is enough on our side.
 9. **A confirmation can be replayed within its TTL (observed in the spike).** Using the same genuine `request_state` a second time ran the tool body again; neither the SDK nor the middleware refused it. Whoever holds the state (the client) can re-run that exact call for up to 10 minutes. For a non-idempotent write such as `create_contact` that means a duplicate. It's stateless by design, so the middleware alone can't fix it. Decided (open question 7): document it and recommend `RequestStateSecurity(ttl=120)`.
