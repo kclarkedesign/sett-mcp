@@ -107,6 +107,8 @@ def serve(**options):
             public = options.get("public", ()) and body.get("method") in options["public"]
             if options.get("public_handshake_only") and self.headers.get("Mcp-Protocol-Version") != "2026-07-28":
                 public = True
+            if options.get("handshake_rejects_token") and self.headers.get("Authorization") and self.headers.get("Mcp-Protocol-Version") != "2026-07-28":
+                return self.json({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32600, "message": "No tokens here"}}, 400)
             if options.get("auth") and not public and self.headers.get("Authorization") != "Bearer good":
                 challenge = 'Bearer error="invalid_token"'
                 if not options.get("no_challenge_link"):
@@ -966,3 +968,27 @@ def test_oauth_endpoints_with_a_fragment_fail(server, key, value):
 def test_an_issuer_with_a_query_or_fragment_fails(server, issuer):
     url, _ = server(auth=True, issuer=issuer)
     assert statuses(check(url))["Authorization server metadata"] == "FAIL"
+
+
+def test_a_public_handshake_is_found_even_when_the_token_breaks_it(server):
+    url, _ = server(auth=True, public_handshake_only=True, handshake_rejects_token=True)
+    results = statuses(check(url, token="good"))
+    assert results["Token not needed"] == "INFO" and "Token accepted" not in results
+
+
+def test_with_a_token_the_sign_in_metadata_is_still_checked(server):
+    url, _ = server(auth=True, public={"server/discover", "initialize", "notifications/initialized"}, no_pkce=True)
+    results = statuses(check(url, token="good"))
+    assert results["Token accepted"] == "PASS" and results["Requires sign-in"] == "PASS"
+    assert results["PKCE (S256)"] == "FAIL"
+
+
+@pytest.mark.parametrize("kind", ["application/json-seq", "text/event-stream-invalid", "application/jsonx"])
+def test_a_media_type_that_only_starts_like_json_or_sse_fails(server, kind):
+    url, _ = server(content_type=kind)
+    assert statuses(check(url))["Answers MCP requests"] == "FAIL"
+
+
+def test_a_charset_parameter_is_fine(server):
+    url, _ = server(content_type="application/json; charset=utf-8")
+    assert statuses(check(url))["Lists tools"] == "PASS"

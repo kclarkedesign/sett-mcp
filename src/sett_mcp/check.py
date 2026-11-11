@@ -151,7 +151,7 @@ def _request(method: str, url: str, headers: Mapping[str, str], body: bytes | No
         found = _headers(response.headers)
         if response.geturl() != url:
             found[FINAL_URL] = response.geturl()
-        if found.get("content-type", "").lower().startswith("text/event-stream"):
+        if media_type(found) == "text/event-stream":
             # A stream may never end: a GET is judged on its headers alone, and a POST is read
             # only until the reply to its request arrives, as a client would.
             return response.status, found, b"" if method == "GET" else _read_events(response, _request_id(body))
@@ -359,7 +359,7 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
             add(Result("FAIL", "Tools over the handshake", problem, f"Clients still on the handshake can't use the tools, though {MODERN} clients can"))
     if tools_status == 200:
         if token and open_first:
-            _check_open_with_token(url, request, modern_ok, handshake_ok, loopback, add)
+            _check_open_with_token(url, request, loopback, add, check_sign_in=not signed_in_checked)
         elif token:
             add(Result("PASS", "Token accepted", "tools/list answered with it"))
         elif loopback:
@@ -391,23 +391,36 @@ def _handshake_tools(url: str, request: Request, token: str | None, era: _Era) -
     return f"Malformed: {'; '.join(malformed)}" if malformed else ""
 
 
-def _check_open_with_token(url: str, request: Request, modern_ok: bool, handshake_ok: bool, loopback: bool, add: Callable[[Result], None]) -> None:
-    """The token worked; do the tools list without one too, over any protocol the server offers?"""
-    open_over = []
-    if modern_ok and _lists_tools(request, url, _Era(modern=True)):
+def _check_open_with_token(url: str, request: Request, loopback: bool, add: Callable[[Result], None], *, check_sign_in: bool) -> None:
+    """The token worked; do the tools list without one too, over either protocol?
+
+    Both are tried whatever the token got, since a protocol can be public without a token
+    and broken with one. A 401 seen along the way is the sign-in challenge, checked as usual.
+    """
+    open_over, challenge = [], None
+    modern = _lists_tools(request, url, _Era(modern=True))
+    if modern[0]:
         open_over.append(MODERN)
-    if handshake_ok:
-        anonymous = _anonymous_handshake(request, url)
-        if anonymous is not None and _lists_tools(request, url, anonymous):
+    elif modern[1] == 401:
+        challenge = modern[2]
+    anonymous = _anonymous_handshake(request, url)
+    if anonymous is not None:
+        handshake = _lists_tools(request, url, anonymous)
+        if handshake[0]:
             open_over.append("the handshake")
+        elif handshake[1] == 401 and challenge is None:
+            challenge = handshake[2]
     if open_over:
         add(Result("INFO", "Token not needed", f"The tools list without a token over {' and '.join(open_over)}"))
         if loopback:
             add(Result("INFO", "No sign-in required", "Fine on this machine"))
         else:
             add(Result("WARN", "No sign-in required", "Anyone who finds this address can list and call its tools", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
-    else:
-        add(Result("PASS", "Token accepted", "tools/list answered with it, and not without it"))
+        return
+    add(Result("PASS", "Token accepted", "tools/list answered with it, and not without it"))
+    if challenge is not None and check_sign_in:
+        add(Result("PASS", "Requires sign-in", "tools/list without a token gets 401"))
+        _check_sign_in(url, challenge, request, add)
 
 
 def _anonymous_handshake(request: Request, url: str) -> _Era | None:
@@ -424,10 +437,11 @@ def _anonymous_handshake(request: Request, url: str) -> _Era | None:
     return era
 
 
-def _lists_tools(request: Request, url: str, era: _Era) -> bool:
-    """Whether tools/list answers without a token in this era."""
+def _lists_tools(request: Request, url: str, era: _Era) -> tuple[bool, int, Mapping[str, str]]:
+    """(whether tools/list answers without a token in this era, its status, its headers)."""
     status, headers, body = _call(request, url, None, era, "tools/list", 90)
-    return status == 200 and isinstance(_dict((_message(headers, body, 90) or {}).get("result")).get("tools"), list)
+    listed = status == 200 and isinstance(_dict((_message(headers, body, 90) or {}).get("result")).get("tools"), list)
+    return listed, status, headers
 
 
 def _token_rejected(url: str, status: int, headers: Mapping[str, str], request: Request, add: Callable[[Result], None], *, check_sign_in: bool) -> None:
@@ -485,9 +499,13 @@ def _post(request: Request, url: str, payload: dict[str, Any], token: str | None
     return request("POST", url, sent, json.dumps(payload).encode())
 
 
+def media_type(headers: Mapping[str, str]) -> str:
+    """The Content-Type without its parameters: "application/json; charset=utf-8" is application/json."""
+    return headers.get("content-type", "").split(";", 1)[0].strip().lower()
+
+
 def _content_type_ok(headers: Mapping[str, str]) -> bool:
-    kind = headers.get("content-type", "").lower()
-    return kind.startswith(("application/json", "text/event-stream"))
+    return media_type(headers) in ("application/json", "text/event-stream")
 
 
 def _message(headers: Mapping[str, str], body: bytes, id_: int) -> dict[str, Any] | None:
@@ -496,9 +514,9 @@ def _message(headers: Mapping[str, str], body: bytes, id_: int) -> dict[str, Any
     Clients only accept application/json and text/event-stream, and match replies to
     requests by id, so anything else counts as no reply.
     """
-    kind = headers.get("content-type", "").lower()
+    kind = media_type(headers)
     text = body.decode(errors="replace")
-    if kind.startswith("text/event-stream"):
+    if kind == "text/event-stream":
         data: list[str] = []
         for line in [*text.splitlines(), ""]:
             if line.startswith("data:"):
@@ -509,7 +527,7 @@ def _message(headers: Mapping[str, str], body: bytes, id_: int) -> dict[str, Any
                 if _is_reply(message, id_):
                     return message
         return None
-    if not kind.startswith("application/json"):
+    if kind != "application/json":
         return None
     message = _json_object(text)
     return message if _is_reply(message, id_) else None
@@ -752,7 +770,7 @@ def _check_get(url: str, request: Request, token: str | None, session: Mapping[s
         return
     if status == 405:
         add(Result("PASS", "GET on the endpoint", "405, so clients don't hold a stream open"))
-    elif status == 200 and response.get("content-type", "").lower().startswith("text/event-stream"):
+    elif status == 200 and media_type(response) == "text/event-stream":
         add(Result("PASS", "GET on the endpoint", "Opens an event stream"))
     elif status == 401 and not token:
         add(Result("PASS", "GET on the endpoint", "Requires sign-in too"))
