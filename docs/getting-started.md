@@ -102,3 +102,5 @@ This pulls in a newer Sett release and keeps your answers and your edits. It nee
 | PowerShell says "running scripts is disabled on this system" | That's the npm launcher for a tool such as `vercel`. Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or type `vercel.cmd` instead of `vercel`. |
 | `uvx sett-mcp new` stops with a git error | Install [Git](https://git-scm.com/downloads) (`winget install --id Git.Git -e` on Windows): Sett's template is fetched with it. |
 | `sett-mcp update` refuses to run | Commit your changes first (`git add -A`, `git commit -m "before update"`). |
+
+Anything else, or still stuck: ask in [Sett's Discussions](https://github.com/kclarkedesign/sett-mcp/discussions/categories/q-a). Say which OS, client and command, and never paste tokens or keys.

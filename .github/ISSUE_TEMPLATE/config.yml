@@ -1,0 +1,9 @@
+# Shown when someone clicks "New issue": questions go to Discussions, bugs stay here.
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question
+    url: https://github.com/kclarkedesign/sett-mcp/discussions/categories/q-a
+    about: Setup trouble, "how do I...?", client quirks. Answers there help the next person too.
+  - name: Suggest an idea
+    url: https://github.com/kclarkedesign/sett-mcp/discussions/categories/ideas
+    about: Features, deploy targets or clients you'd like supported.
