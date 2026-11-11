@@ -5,7 +5,7 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directories: ["/", "/template"]
+    directories: ["/", "/template/.github/workflows"]  # "/" means .github/workflows; any other entry is the folder itself
     schedule:
       interval: monthly
     groups:
