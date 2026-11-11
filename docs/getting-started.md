@@ -81,7 +81,7 @@ uv run my-server deploy vercel --auth supabase --create-supabase-project --write
 uv run my-server users add you@example.com --writer      # several at once: ada@example.com bob@example.com
 ```
 
-Before sharing the address, test it the way clients will: `uvx sett-mcp check https://<your-project>.vercel.app/mcp`. It lists PASS, WARN and FAIL with a fix for each.
+Before sharing the address, test it the way clients will: `uvx sett-mcp check https://<your-project>.vercel.app/mcp`. It prints one line per check (PASS, WARN, FAIL or INFO) and a fix under each WARN or FAIL. If a FAIL isn't clear, your project's `docs/troubleshooting.md` has a "Testing a deployed server" section that explains the common ones, such as a sign-in that answers 403 instead of 401.
 
 Then, in claude.ai: **Settings, Connectors, Add custom connector**, paste `https://<your-project>.vercel.app/mcp`, connect, sign in on the consent page (GitHub, or an emailed link opened in the same browser) and choose **Allow**. Your project's `docs/remote.md` has the same steps for Cursor and Codex.
 
