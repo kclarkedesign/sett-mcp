@@ -119,7 +119,7 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     modern_era, handshake_era = _Era(modern=True), _Era(modern=False)
     try:  # anonymously, as a client's first request: the current protocol first, then the handshake
         status, headers, body = _call(request, url, None, modern_era, "server/discover", 1)
-        if status not in (200, 401) and not 300 <= status < 400:
+        if status != 401 and not 300 <= status < 400 and not _discovered(headers, body):
             status, headers, body = _post(request, url, _initialize(), None)
     except TRANSPORT_ERRORS as exc:
         add(Result("FAIL", "Server reachable", str(exc), "Check the address, and that the server is running"))
@@ -133,10 +133,7 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
             add(Result("INFO", "Tools not checked", "Add --token - to check them too (it asks for an access token)"))
             return
     elif status == 200:
-        if loopback:
-            add(Result("INFO", "No sign-in required", "Fine on this machine"))
-        else:
-            add(Result("WARN", "No sign-in required", "Anyone who finds this address can call its tools", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
+        pass  # whether sign-in is needed is decided once tools/list has been tried
     elif 300 <= status < 400:
         where = headers.get("location", "somewhere else")
         add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} redirects (HTTP {status}) to {where}", "Give clients the final address: they don't follow redirects with requests and tokens"))
@@ -148,12 +145,14 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     # Both protocol eras, with the token if there is one (its own session, so the tools
     # are listed as the token's user sees them).
     m_status, m_headers, m_body = _call(request, url, token, modern_era, "server/discover", 1)
-    discovered = _dict((_message(m_headers, m_body) or {}).get("result"))
-    versions = discovered.get("supportedVersions")
-    modern_ok = m_status == 200 and isinstance(versions, list) and MODERN in versions
+    discovered = _discovered(m_headers, m_body) if m_status == 200 else {}
+    modern_ok = bool(discovered)
     h_status, h_headers, h_body = _post(request, url, _initialize(), token)
-    info = _dict((_message(h_headers, h_body) or {}).get("result"))
+    info = _dict((_message(h_headers, h_body, 1) or {}).get("result"))
     handshake_ok = h_status == 200 and bool(info.get("protocolVersion"))
+    if not token and 401 in (m_status, h_status):  # one of them is public, the other needs sign-in
+        _requires_sign_in(url, h_headers if h_status == 401 else m_headers, request, add, "Some requests are public, but this one needs a token")
+        return
 
     if not (modern_ok or handshake_ok):
         if token and {m_status, h_status} & {401, 403}:
@@ -178,9 +177,31 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         add(Result("WARN", "Handshake protocol", f"initialize answered HTTP {h_status}", f"Clients that haven't moved to {MODERN} can't connect; serve both (the MCP Python SDK does by default)"))
 
     era = modern_era if modern_ok else handshake_era  # what current clients use
-    _check_get(url, request, token, handshake_era.headers if handshake_ok else {"mcp-protocol-version": MODERN}, add)
+    get_headers = handshake_era.headers if handshake_ok else {"mcp-protocol-version": MODERN}
+    challenge = _check_tools(url, request, token, era, add)
+    if challenge is not None:  # discovery is public, the tools aren't: that's sign-in working
+        _requires_sign_in(url, challenge, request, add, "Discovery is public; tools/list needs a token")
+        return
+    if not token:
+        if loopback:
+            add(Result("INFO", "No sign-in required", "Fine on this machine"))
+        else:
+            add(Result("WARN", "No sign-in required", "Anyone who finds this address can list and call its tools", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
+    _check_get(url, request, token, get_headers, add)
     _check_origin(url, request, token, era, add)
-    _check_tools(url, request, token, era, add)
+
+
+def _requires_sign_in(url: str, headers: Mapping[str, str], request: Request, add: Callable[[Result], None], detail: str) -> None:
+    add(Result("PASS", "Requires sign-in", detail))
+    _check_sign_in(url, headers, request, add)
+    add(Result("INFO", "Tools not checked", "Add --token - to check them too (it asks for an access token)"))
+
+
+def _discovered(headers: Mapping[str, str], body: bytes) -> dict[str, Any]:
+    """A 2026-07-28 server/discover result offering that version, or {} (an error, or another reply)."""
+    result = _dict((_message(headers, body, 1) or {}).get("result"))
+    versions = result.get("supportedVersions")
+    return result if isinstance(versions, list) and MODERN in versions else {}
 
 
 @dataclass
@@ -227,8 +248,11 @@ def _post(request: Request, url: str, payload: dict[str, Any], token: str | None
     return request("POST", url, sent, json.dumps(payload).encode())
 
 
-def _message(headers: Mapping[str, str], body: bytes) -> dict[str, Any] | None:
-    """The JSON-RPC reply, whether the server answered with JSON or an event stream."""
+def _message(headers: Mapping[str, str], body: bytes, id_: int) -> dict[str, Any] | None:
+    """The JSON-RPC reply to request `id_`, whether the server answered with JSON or an event stream.
+
+    Replies for another id are ignored, as a client would: it matches replies to requests by id.
+    """
     text = body.decode(errors="replace")
     if headers.get("content-type", "").startswith("text/event-stream"):
         for line in text.splitlines():
@@ -237,14 +261,14 @@ def _message(headers: Mapping[str, str], body: bytes) -> dict[str, Any] | None:
                     data = json.loads(line[5:].strip())
                 except ValueError:
                     continue
-                if isinstance(data, dict) and ("result" in data or "error" in data):
+                if isinstance(data, dict) and ("result" in data or "error" in data) and data.get("id") == id_:
                     return data
         return None
     try:
         data = json.loads(text)
     except ValueError:
         return None
-    return data if isinstance(data, dict) else None
+    return data if isinstance(data, dict) and data.get("id") == id_ else None
 
 
 def _snippet(body: bytes) -> str:
@@ -271,8 +295,8 @@ def _check_sign_in(url: str, headers: Mapping[str, str], request: Request, add: 
     parts = urlsplit(url)
     well_known = f"{parts.scheme}://{parts.netloc}/.well-known/oauth-protected-resource{parts.path}"
     metadata_url = found.group(1) if found else well_known
-    if found and not _absolute(metadata_url):
-        add(Result("FAIL", "401 points to sign-in", f"resource_metadata is {metadata_url}, not an absolute address", "Send the full https address of the resource metadata"))
+    if found and not _usable(metadata_url):
+        add(Result("FAIL", "401 points to sign-in", f"resource_metadata is {metadata_url}, not an https address", "Send the full https address of the resource metadata; clients won't fetch it otherwise"))
         metadata_url = well_known
     elif found:
         add(Result("PASS", "401 points to sign-in", "WWW-Authenticate names the resource metadata"))
@@ -337,11 +361,6 @@ def _check_authorization_server(issuer: str, request: Request, add: Callable[[Re
         add(Result("WARN", "Clients can register themselves", "No registration_endpoint and no client ID metadata documents", "Each client must then be registered by hand; Claude and Cursor expect to register themselves"))
 
 
-def _absolute(address: str) -> bool:
-    parts = urlsplit(address)
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
-
-
 def _usable(endpoint: object) -> bool:
     """An absolute https address (plain http only on this machine)."""
     if not isinstance(endpoint, str):
@@ -378,16 +397,19 @@ def _check_origin(url: str, request: Request, token: str | None, era: _Era, add:
         add(Result("WARN", "Refuses other websites", f"A request with Origin: https://example.invalid got HTTP {status}", "Check the Origin header, so another website's page can't call the server through a visitor's browser"))
 
 
-def _check_tools(url: str, request: Request, token: str | None, era: _Era, add: Callable[[Result], None]) -> None:
+def _check_tools(url: str, request: Request, token: str | None, era: _Era, add: Callable[[Result], None]) -> Mapping[str, str] | None:
+    """Check the tools; returns the 401's headers when listing them needs a token we don't have."""
     tools: list[Any] = []
     cursor = None
     for page in range(MAX_PAGES):
         params = {"cursor": cursor} if cursor else {}
         status, headers, body = _call(request, url, token, era, "tools/list", 3 + page, params)
-        result = _dict((_message(headers, body) or {}).get("result"))
+        if status == 401 and not token and page == 0:
+            return headers
+        result = _dict((_message(headers, body, 3 + page) or {}).get("result"))
         if status != 200 or not isinstance(result.get("tools"), list):
             add(Result("FAIL", "Lists tools", f"HTTP {status}: {_snippet(body)}" + (f" (page {page + 1})" if page else "")))
-            return
+            return None
         tools += result["tools"]
         cursor = result.get("nextCursor")
         if not cursor:
@@ -397,7 +419,7 @@ def _check_tools(url: str, request: Request, token: str | None, era: _Era, add: 
     add(Result("PASS", "Lists tools", f"{len(tools)} tool{'s' if len(tools) != 1 else ''}"))
     malformed = [_label(t, i) for i, t in enumerate(tools) if _schema_problem(t)]
     if malformed:
-        add(Result("FAIL", "Tool definitions", f"Malformed: {', '.join(malformed)}", "Each tool needs an object inputSchema whose properties is an object; clients may drop or reject these tools"))
+        add(Result("FAIL", "Tool definitions", f"Malformed: {', '.join(malformed)}", "Each tool needs an inputSchema with \"type\": \"object\" (and properties, if any, as an object); clients may drop or reject these tools"))
     tools = [t for t in tools if not _schema_problem(t)]
     bad_names = [t.get("name") for t in tools if not TOOL_NAME.match(str(t.get("name", "")))]
     if bad_names:
@@ -423,6 +445,7 @@ def _check_tools(url: str, request: Request, token: str | None, era: _Era, add: 
         add(Result("WARN", "Read-only and destructive hints", f"None on: {', '.join(map(str, unhinted))}", "Clients use readOnlyHint and destructiveHint to decide when to ask the user first"))
     else:
         add(Result("PASS", "Read-only and destructive hints"))
+    return None
 
 
 def _dict(value: object) -> dict[str, Any]:
@@ -430,11 +453,13 @@ def _dict(value: object) -> dict[str, Any]:
 
 
 def _schema_problem(tool: object) -> bool:
-    """True when a tool entry isn't an object, or its inputSchema or properties isn't one."""
+    """True when a tool entry isn't an object, or its inputSchema doesn't describe one."""
     if not isinstance(tool, dict):
         return True
     schema = tool.get("inputSchema")
-    return not isinstance(schema, dict) or not isinstance(schema.get("properties", {}), dict) or not isinstance(tool.get("annotations", {}), dict)
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return True
+    return not isinstance(schema.get("properties", {}), dict) or not isinstance(tool.get("annotations", {}), dict)
 
 
 def _label(tool: object, index: int) -> str:

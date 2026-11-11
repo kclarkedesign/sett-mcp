@@ -68,7 +68,8 @@ def serve(**options):
             state["authorizations"].append(self.headers.get("Authorization"))
             if options.get("redirect_to"):
                 return self.reply(307, b"", [("Location", options["redirect_to"])])
-            if options.get("auth") and self.headers.get("Authorization") != "Bearer good":
+            public = options.get("public", ()) and body.get("method") in options["public"]
+            if options.get("auth") and not public and self.headers.get("Authorization") != "Bearer good":
                 challenge = 'Bearer error="invalid_token"'
                 if not options.get("no_challenge_link"):
                     base = f"http://127.0.0.1:{self.server.server_port}"
@@ -81,11 +82,13 @@ def serve(**options):
             method = body.get("method")
             era = options.get("era", "both")
             modern = self.headers.get("Mcp-Protocol-Version") == "2026-07-28" and self.headers.get("Mcp-Method") == method
-            if modern and era == "legacy" or method == "initialize" and era == "modern":
+            if (modern and era == "legacy" and not options.get("discover_error_200")) or (method == "initialize" and era == "modern"):
                 return self.json({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32600, "message": "Bad Request"}}, 400)
             if method == "server/discover" and modern:
                 result = {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": {}}, "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "acme", "version": "1"}}}
                 return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result})
+            if method == "server/discover" and options.get("discover_error_200"):
+                return self.json({"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32601, "message": "Method not found"}})
             if method == "server/discover":
                 return self.json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Missing session ID"}}, 400)
             if method == "initialize":
@@ -357,6 +360,59 @@ def test_odd_authorization_servers_fail_cleanly(servers):
         return 405, {}, b""
 
     assert statuses(check("https://srv.example/mcp", request=odd))["Authorization server named"] == "FAIL"
+
+
+def test_a_discover_error_with_http_200_falls_back_to_the_handshake(server):
+    url, _ = server(era="legacy", discover_error_200=True, auth=True, public={"server/discover"})
+    results = statuses(check(url))
+    assert results["Requires sign-in"] == "PASS" and results["Protected resource metadata"] == "PASS"
+    assert "Answers MCP requests" not in results
+
+
+def test_public_discovery_with_protected_tools_is_sign_in_working(server):
+    url, _ = server(auth=True, public={"server/discover", "initialize", "notifications/initialized"})
+    results = check(url)
+    named = statuses(results)
+    assert named["Requires sign-in"] == "PASS" and named["Authorization server metadata"] == "PASS"
+    assert "No sign-in required" not in named and "Lists tools" not in named
+
+
+def test_an_open_server_is_only_called_open_once_its_tools_list_without_a_token(server, monkeypatch):
+    url, _ = server()
+    monkeypatch.setattr(check_module, "LOOPBACK", set())
+    names = [r.name for r in check(url)]
+    assert names.index("Lists tools") < names.index("No sign-in required")
+
+
+def test_plain_http_resource_metadata_fails_on_a_public_server():
+    def odd(method, target, headers, body):
+        if method == "POST":
+            return 401, {"www-authenticate": 'Bearer resource_metadata="http://metadata.example/.well-known/oauth-protected-resource/mcp"'}, b""
+        return 404, {}, b""
+
+    assert statuses(check("https://srv.example/mcp", request=odd))["401 points to sign-in"] == "FAIL"
+
+
+@pytest.mark.parametrize("schema", [{"type": "array", "properties": {}}, {"properties": {}}])
+def test_an_input_schema_that_is_not_an_object_is_malformed(server, schema):
+    tools = [TOOLS[0], {"name": "acme_odd", "description": "A tool whose schema isn't an object.", "inputSchema": schema}]
+    url, _ = server(tools=tools)
+    result = next(r for r in check(url) if r.name == "Tool definitions")
+    assert result.status == "FAIL" and "acme_odd" in result.detail
+
+
+def test_a_reply_with_the_wrong_id_is_ignored(server):
+    url, _ = server()
+
+    def wrong_ids(method, target, headers, body):
+        status, response_headers, raw = check_module.http_request(method, target, headers, body)
+        if body and json.loads(body).get("method") == "tools/list":
+            data = json.loads(raw)
+            data["id"] = 999
+            raw = json.dumps(data).encode()
+        return status, response_headers, raw
+
+    assert statuses(check(url, request=wrong_ids))["Lists tools"] == "FAIL"
 
 
 def test_an_unreachable_server_fails_cleanly():
