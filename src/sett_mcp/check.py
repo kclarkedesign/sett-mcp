@@ -278,6 +278,15 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         not_checked = "Check again with a clean token to check them too"
 
     modern_era, handshake_era = _Era(modern=True), _Era(modern=False)
+    refused = False
+
+    def refuse(why: str) -> None:
+        """Report a recognized 2026-07-28 error, once, wherever it is first seen."""
+        nonlocal refused
+        if not refused:
+            refused = True
+            add(_refused(why))
+
     first_refusal = ""
     try:  # anonymously, as a client's first request: the current protocol first, then the handshake
         status, headers, body = _call(request, url, None, modern_era, "server/discover", 1)
@@ -292,6 +301,8 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     except TRANSPORT_ERRORS as exc:
         add(Result("FAIL", "Server reachable", str(exc), _transport_fix(exc)))
         return
+    if first_refusal:  # said now: asking for a token, or a handshake that fails too, can end the check before the verdict
+        refuse(first_refusal)
     if headers.get(FINAL_URL):
         add(Result("INFO", "Redirect", f"{url} redirects to {headers[FINAL_URL]}", f"Clients follow it, but giving them {headers[FINAL_URL]} saves a round trip"))
 
@@ -317,9 +328,7 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         if not token:
             return
     elif status != 200:
-        if first_refusal:  # the handshake failed too, but the 2026-07-28 error says more
-            add(_refused(first_refusal))
-        else:
+        if not first_refusal:  # otherwise the 2026-07-28 error above already says what is wrong
             add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} answered {_why(status, headers, body)}", "Is this the MCP endpoint? Most servers answer at /mcp"))
         return
     open_first = status == 200  # whether sign-in is needed is decided once tools/list has been tried
@@ -345,9 +354,9 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
             rejected = h_headers if h_status in (401, 403) else m_headers
             _token_rejected(url, h_status if h_status in (401, 403) else m_status, rejected, request, add, check_sign_in=not signed_in_checked)
         elif refusal:
-            add(_refused(refusal))
+            refuse(refusal)
         else:
-            add(Result("FAIL", "Answers MCP requests", f"server/discover: {_why(m_status, m_headers, m_body)}; initialize: {_why(h_status, h_headers, h_body)}", "The server didn't return an MCP result for either protocol version"))
+            add(Result("FAIL", "Answers MCP requests", f"server/discover:{_why(m_status, m_headers, m_body)}; initialize: {_why(h_status, h_headers, h_body)}", "The server didn't return an MCP result for either protocol version"))
         return
 
     if not token and m_status == 401:
@@ -357,8 +366,8 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     elif discovered:
         add(Result("FAIL", f"Protocol {MODERN}", f"server/discover is missing or has wrong {', '.join(modern_problems)}", f"Current clients choose {MODERN} and then reject this reply; update the server's MCP SDK"))
     elif refusal:  # reported even when the handshake works: clients that choose 2026-07-28 won't try it
-        add(_refused(refusal))
-    else:
+        refuse(refusal)
+    elif not refused:  # (if the first request was refused, that FAIL already says so)
         add(Result("INFO", f"Protocol {MODERN}", "Not offered; current clients fall back to the handshake"))
     if handshake_ok:
         if h_headers.get("mcp-session-id"):

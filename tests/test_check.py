@@ -1123,6 +1123,19 @@ def test_the_recognized_error_is_reported_when_the_handshake_fails_too(server):
     assert "Answers MCP requests" not in statuses(results)
 
 
+@pytest.mark.parametrize("token", [None, "good"])
+def test_the_recognized_error_is_reported_once_even_when_sign_in_ends_the_check(server, token):
+    # Codex, round 1: discover is public and refused, the handshake asks for a token. With no token the
+    # check ends after the sign-in lines, and used to exit 0 for a server 2026-07-28 clients can't use.
+    url, _ = server(auth=True, public={"server/discover"}, discover_error={"code": -32021, "message": "needs sampling"})
+    results = check(url, token=token)
+    refusals = [r for r in results if r.name == "Protocol 2026-07-28"]
+    assert [r.status for r in refusals] == ["FAIL"] and "MissingRequiredClientCapability" in refusals[0].detail
+    assert report(results, lambda line: None) == 1
+    if not token:
+        assert statuses(results)["Requires sign-in"] == "PASS"
+
+
 # 2. A failed notifications/initialized fails the handshake.
 
 
