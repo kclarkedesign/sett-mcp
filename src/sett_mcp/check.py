@@ -21,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 PROTOCOL = "2025-11-25"
 USER_AGENT = "sett-mcp-check"
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+MAX_PAGES = 50  # of tools/list
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # (method, url, headers, body) -> (status, headers, body)
@@ -96,6 +97,9 @@ def check(url: str, *, token: str | None = None, request: Request = http_request
         add(Result("INFO", "Plain http on this machine", "Fine for testing; deploy with https"))
     else:
         add(Result("FAIL", "Uses plain http", url, "Clients send sign-in tokens to this address; serve it over https"))
+        if token:  # never put a credential on the network unencrypted, even to check it
+            add(Result("FAIL", "Token not sent", "This address is plain http, so the token would cross the network unencrypted", "Check the https address instead"))
+            token = None
 
     try:
         status, headers, body = _post(request, url, _initialize(), None)
@@ -305,11 +309,22 @@ def _check_origin(url: str, request: Request, token: str | None, session: Mappin
 
 
 def _check_tools(url: str, request: Request, token: str | None, session: Mapping[str, str], add: Callable[[Result], None]) -> None:
-    status, headers, body = _post(request, url, {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}, token, session)
-    tools = ((_message(headers, body) or {}).get("result") or {}).get("tools")
-    if status != 200 or not isinstance(tools, list):
-        add(Result("FAIL", "Lists tools", f"HTTP {status}: {_snippet(body)}"))
-        return
+    tools: list[Any] = []
+    cursor = None
+    for page in range(MAX_PAGES):
+        params = {"cursor": cursor} if cursor else {}
+        status, headers, body = _post(request, url, {"jsonrpc": "2.0", "id": 3 + page, "method": "tools/list", "params": params}, token, session)
+        result = (_message(headers, body) or {}).get("result") or {}
+        if status != 200 or not isinstance(result.get("tools"), list):
+            add(Result("FAIL", "Lists tools", f"HTTP {status}: {_snippet(body)}" + (f" (page {page + 1})" if page else "")))
+            return
+        tools += result["tools"]
+        cursor = result.get("nextCursor")
+        if not cursor:
+            break
+    else:
+        add(Result("WARN", "Lists tools", f"Stopped after {MAX_PAGES} pages; only those tools were checked", "A nextCursor that never runs out makes clients loop too"))
+    tools = [t for t in tools if isinstance(t, dict)]
     add(Result("PASS", "Lists tools", f"{len(tools)} tool{'s' if len(tools) != 1 else ''}"))
     bad_names = [t.get("name") for t in tools if not TOOL_NAME.match(str(t.get("name", "")))]
     if bad_names:

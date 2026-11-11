@@ -84,6 +84,13 @@ def serve(**options):
             if method == "tools/list":
                 state["sessions"].append(self.headers.get("Mcp-Session-Id"))
                 tools = options.get("tools", TOOLS)
+                if options.get("pages"):
+                    index = int((body.get("params") or {}).get("cursor") or 0)
+                    pages = options["pages"]
+                    result = {"tools": pages[index]}
+                    if index + 1 < len(pages):
+                        result["nextCursor"] = str(index + 1)
+                    return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result})
                 if options.get("sse"):
                     data = f"event: message\ndata: {json.dumps({'jsonrpc': '2.0', 'id': body['id'], 'result': {'tools': tools}})}\n\n"
                     return self.reply(200, data.encode(), [("Content-Type", "text/event-stream")])
@@ -220,6 +227,23 @@ def test_unusable_authorization_server_metadata_fails(server, metadata):
 def test_a_relative_registration_endpoint_does_not_count(server):
     url, _ = server(auth=True, metadata={"registration_endpoint": "/register"})
     assert statuses(check(url))["Clients can register themselves"] == "WARN"
+
+
+def test_a_token_is_never_sent_over_plain_http_to_another_machine(server, monkeypatch):
+    url, state = server(auth=True)
+    monkeypatch.setattr(check_module, "LOOPBACK", set())
+    results = statuses(check(url, token="good"))
+    assert results["Token not sent"] == "FAIL" and results["Tools not checked"] == "INFO"
+    assert "Bearer good" not in state["authorizations"]
+
+
+def test_every_page_of_tools_is_checked(server):
+    bad = {"name": "acme_delete_everything", "description": "", "inputSchema": {"type": "object"}}
+    url, state = server(pages=[TOOLS, [bad]])
+    results = check(url)
+    lists = next(r for r in results if r.name == "Lists tools")
+    assert lists.detail == "2 tools" and len(state["sessions"]) == 2
+    assert statuses(results)["Tool descriptions"] == "WARN"
 
 
 def test_an_unreachable_server_fails_cleanly():
