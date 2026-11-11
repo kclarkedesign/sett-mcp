@@ -517,7 +517,10 @@ def _message(headers: Mapping[str, str], body: bytes, id_: int) -> dict[str, Any
 
 def _is_reply(message: dict[str, Any] | None, id_: object) -> bool:
     """A JSON-RPC 2.0 reply to request `id_`: the version, the id, and exactly one of result or error."""
-    return message is not None and message.get("jsonrpc") == "2.0" and message.get("id") == id_ and ("result" in message) != ("error" in message)
+    if message is None or message.get("jsonrpc") != "2.0" or ("result" in message) == ("error" in message):
+        return False
+    reply_id = message.get("id")
+    return not isinstance(reply_id, bool) and reply_id == id_  # JSON true isn't the id 1, though Python says True == 1
 
 
 def _json_object(text: str | bytes) -> dict[str, Any] | None:
@@ -600,12 +603,17 @@ def _get(request: Request, url: str) -> tuple[int, dict[str, Any] | None]:
     return status, _json_object(body) if status == 200 else None
 
 
-def _usable(endpoint: object) -> bool:
-    """An absolute https address (plain http only on this machine)."""
+def _usable(endpoint: object, *, issuer: bool = False) -> bool:
+    """An absolute https address (plain http only on this machine), with no fragment.
+
+    An issuer may not have a query either (RFC 8414 section 2; RFC 6749 section 3.1 for endpoints).
+    """
     if not isinstance(endpoint, str):
         return False
     try:
         parts = urlsplit(endpoint)
+        if parts.fragment or "#" in endpoint or (issuer and (parts.query or "?" in endpoint)):
+            return False
         host = parts.hostname
         parts.port  # noqa: B018 (raises ValueError for a port that isn't a number in range)
     except ValueError:
@@ -685,8 +693,8 @@ def _issuer_form(address: str) -> str:
 
 
 def _check_authorization_server(issuer: str, request: Request, add: Callable[[Result], None]) -> None:
-    if not _usable(issuer):
-        add(Result("FAIL", "Authorization server metadata", f"The issuer {issuer} isn't an https address", "List the issuer's full https address in authorization_servers"))
+    if not _usable(issuer, issuer=True):
+        add(Result("FAIL", "Authorization server metadata", f"The issuer {issuer} isn't an https address without a query or fragment", "List the issuer's full https address in authorization_servers (RFC 8414 forbids a query or fragment in it)"))
         return
     parts = urlsplit(issuer)
     base, path = f"{parts.scheme}://{parts.netloc}", parts.path.rstrip("/")
@@ -833,8 +841,15 @@ def _tool_problem(tool: object, *, strict: bool) -> str:
     schema = tool.get("inputSchema")
     if not isinstance(schema, dict) or schema.get("type") != "object":
         return 'inputSchema needs "type": "object"'
-    if "annotations" in tool and not isinstance(tool["annotations"], dict):
-        return "annotations isn't an object"
+    annotations = tool.get("annotations")
+    if annotations is not None:
+        if not isinstance(annotations, dict):
+            return "annotations isn't an object"
+        if annotations.get("title") is not None and not isinstance(annotations["title"], str):
+            return "annotations title isn't text"
+        for hint in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+            if annotations.get(hint) is not None and not isinstance(annotations[hint], bool):
+                return f"annotations {hint} isn't true or false"
     if "description" in tool and not isinstance(tool["description"], (str, type(None))):
         return "description isn't text"
     output = tool.get("outputSchema")

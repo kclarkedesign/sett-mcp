@@ -932,3 +932,37 @@ def test_list_properties_never_crash_on_any_protocol(server, era):
 def test_oauth_urls_need_a_host_and_a_valid_port(server, endpoint):
     url, _ = server(auth=True, metadata={"token_endpoint": endpoint})
     assert statuses(check(url))["Authorization server metadata"] == "FAIL"
+
+
+def test_a_boolean_reply_id_is_not_the_number_one(server):
+    url, _ = server()
+
+    def bool_ids(method, target, headers, body):
+        status, found, raw = check_module.http_request(method, target, headers, body)
+        if body and json.loads(body).get("id") == 1 and raw:
+            data = json.loads(raw)
+            data["id"] = True
+            raw = json.dumps(data).encode()
+        return status, found, raw
+
+    assert statuses(check(url, request=bool_ids))["Answers MCP requests"] == "FAIL"
+
+
+@pytest.mark.parametrize("annotations", [{"readOnlyHint": "false"}, {"destructiveHint": 1}, {"title": 5}])
+def test_annotation_values_of_the_wrong_type_are_malformed(server, annotations):
+    tools = [TOOLS[0], {"name": "acme_odd", "description": "A tool with odd annotation values.", "inputSchema": {"type": "object"}, "annotations": annotations}]
+    url, _ = server(tools=tools)
+    result = next(r for r in check(url) if r.name == "Tool definitions")
+    assert result.status == "FAIL" and "acme_odd" in result.detail
+
+
+@pytest.mark.parametrize(("key", "value"), [("token_endpoint", "https://auth.example/token#frag"), ("authorization_endpoint", "https://auth.example/authorize#x")])
+def test_oauth_endpoints_with_a_fragment_fail(server, key, value):
+    url, _ = server(auth=True, metadata={key: value})
+    assert statuses(check(url))["Authorization server metadata"] == "FAIL"
+
+
+@pytest.mark.parametrize("issuer", ["https://auth.example/auth/v1#frag", "https://auth.example/auth/v1?tenant=a"])
+def test_an_issuer_with_a_query_or_fragment_fails(server, issuer):
+    url, _ = server(auth=True, issuer=issuer)
+    assert statuses(check(url))["Authorization server metadata"] == "FAIL"
