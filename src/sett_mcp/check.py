@@ -3,8 +3,9 @@
 Works on any MCP server over Streamable HTTP, not only Sett's. Without a token it checks
 what every client needs before signing in: HTTPS, the 401 that points to sign-in, the
 protected-resource metadata and the authorization server's. With `--token` (or on a
-server that needs no sign-in) it also lists the tools and checks what models and clients
-read from them. Only the standard library; nothing is changed on the server.
+server that needs no sign-in) it also tries both ways clients talk to a server, the
+2026-07-28 protocol (server/discover, no session) and the older initialize handshake,
+then lists the tools and checks what models and clients read from them. Only the standard library; nothing is changed on the server.
 """
 
 from __future__ import annotations
@@ -15,11 +16,12 @@ import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-PROTOCOL = "2025-11-25"
+PROTOCOL = "2025-11-25"  # the newest handshake (initialize) version
+MODERN = "2026-07-28"  # no handshake: server/discover, then self-contained requests
 USER_AGENT = "sett-mcp-check"
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 # What a dropped, reset or timed-out connection raises.
@@ -67,7 +69,10 @@ _opener = urllib.request.build_opener(_SafeRedirects)
 
 
 def http_request(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> tuple[int, Mapping[str, str], bytes]:
-    request = urllib.request.Request(url, data=body, method=method, headers={"User-Agent": USER_AGENT, **headers})
+    try:
+        request = urllib.request.Request(url, data=body, method=method, headers={"User-Agent": USER_AGENT, **headers})
+    except ValueError as exc:  # a relative or otherwise unusable address in the server's metadata
+        raise urllib.error.URLError(f"not a usable address: {url}") from exc
     try:
         with _opener.open(request, timeout=15) as response:  # the URL being checked
             # A GET may open an event stream that never ends: read the headers, not the body.
@@ -111,18 +116,20 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
             add(Result("FAIL", "Token not sent", "This address is plain http, so the token would cross the network unencrypted", "Check the https address instead"))
             token = None
 
-    try:
-        status, headers, body = _post(request, url, _initialize(), None)
+    modern_era, handshake_era = _Era(modern=True), _Era(modern=False)
+    try:  # anonymously, as a client's first request: the current protocol first, then the handshake
+        status, headers, body = _call(request, url, None, modern_era, "server/discover", 1)
+        if status not in (200, 401) and not 300 <= status < 400:
+            status, headers, body = _post(request, url, _initialize(), None)
     except TRANSPORT_ERRORS as exc:
         add(Result("FAIL", "Server reachable", str(exc), "Check the address, and that the server is running"))
         return
 
-    session: dict[str, str] = {}
     if status == 401:
         add(Result("PASS", "Requires sign-in", "Requests without a token get 401"))
         _check_sign_in(url, headers, request, add)
         if not token:
-            _check_get(url, request, None, add)
+            _check_get(url, request, None, {}, add)
             add(Result("INFO", "Tools not checked", "Add --token - to check them too (it asks for an access token)"))
             return
     elif status == 200:
@@ -138,29 +145,70 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} answered HTTP {status}: {_snippet(body)}", "Is this the MCP endpoint? Most servers answer at /mcp"))
         return
 
-    if token:  # a session of its own, so the tools are listed as the token's user sees them
-        status, headers, body = _post(request, url, _initialize(), token)
-        if status != 200:
-            add(Result("FAIL", "Token accepted", f"HTTP {status}", "The token may be expired, or issued for another server (its audience must be this URL)"))
-            return
+    # Both protocol eras, with the token if there is one (its own session, so the tools
+    # are listed as the token's user sees them).
+    m_status, m_headers, m_body = _call(request, url, token, modern_era, "server/discover", 1)
+    discovered = _dict((_message(m_headers, m_body) or {}).get("result"))
+    versions = discovered.get("supportedVersions")
+    modern_ok = m_status == 200 and isinstance(versions, list) and MODERN in versions
+    h_status, h_headers, h_body = _post(request, url, _initialize(), token)
+    info = _dict((_message(h_headers, h_body) or {}).get("result"))
+    handshake_ok = h_status == 200 and bool(info.get("protocolVersion"))
+
+    if not (modern_ok or handshake_ok):
+        if token and {m_status, h_status} & {401, 403}:
+            add(Result("FAIL", "Token accepted", f"HTTP {h_status if h_status in (401, 403) else m_status}", "The token may be expired, or issued for another server (its audience must be this URL)"))
+        else:
+            add(Result("FAIL", "Answers MCP requests", f"server/discover: HTTP {m_status}; initialize: HTTP {h_status}: {_snippet(h_body)}", "The server didn't return an MCP result for either protocol version"))
+        return
+    if token:
         add(Result("PASS", "Token accepted"))
 
-    info = _dict((_message(headers, body) or {}).get("result"))
-    if not info.get("protocolVersion"):
-        add(Result("FAIL", "Initialize", _snippet(body), "The server didn't return an MCP initialize result"))
-        return
-    server = _dict(info.get("serverInfo"))
-    name = " ".join(str(v) for v in (server.get("name"), server.get("version")) if v) or "unnamed server"
-    add(Result("PASS", "Initialize", f"{name}, protocol {info['protocolVersion']}"))
-    if headers.get("mcp-session-id"):
-        session["mcp-session-id"] = headers["mcp-session-id"]
-    session["mcp-protocol-version"] = str(info["protocolVersion"])
-    _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, token, session)
+    if modern_ok:
+        add(Result("PASS", f"Protocol {MODERN}", _server_name(_dict(_dict(discovered.get("_meta")).get("io.modelcontextprotocol/serverInfo")))))
+    else:
+        add(Result("INFO", f"Protocol {MODERN}", "Not offered; current clients fall back to the handshake"))
+    if handshake_ok:
+        add(Result("PASS", "Handshake protocol", f"{_server_name(_dict(info.get('serverInfo')))}, {info['protocolVersion']}"))
+        if h_headers.get("mcp-session-id"):
+            handshake_era.headers["mcp-session-id"] = h_headers["mcp-session-id"]
+        handshake_era.headers["mcp-protocol-version"] = str(info["protocolVersion"])
+        _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, token, handshake_era.headers)
+    else:
+        add(Result("WARN", "Handshake protocol", f"initialize answered HTTP {h_status}", f"Clients that haven't moved to {MODERN} can't connect; serve both (the MCP Python SDK does by default)"))
 
-    _check_get(url, request, token, add)
-    _check_origin(url, request, token, session, add)
-    _check_tools(url, request, token, session, add)
-    return
+    era = modern_era if modern_ok else handshake_era  # what current clients use
+    _check_get(url, request, token, handshake_era.headers if handshake_ok else {"mcp-protocol-version": MODERN}, add)
+    _check_origin(url, request, token, era, add)
+    _check_tools(url, request, token, era, add)
+
+
+@dataclass
+class _Era:
+    """How requests are framed: 2026-07-28 (self-contained) or the handshake (a session)."""
+
+    modern: bool
+    headers: dict[str, str] = field(default_factory=dict)  # the handshake's session headers
+
+
+def _call(request: Request, url: str, token: str | None, era: _Era, method: str, id_: int, params: Mapping[str, Any] | None = None, headers: Mapping[str, str] | None = None) -> tuple[int, Mapping[str, str], bytes]:
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": id_, "method": method}
+    params = dict(params or {})
+    sent = dict(era.headers)
+    if era.modern:  # each request carries the version, the client and its capabilities
+        params["_meta"] = {
+            "io.modelcontextprotocol/protocolVersion": MODERN,
+            "io.modelcontextprotocol/clientInfo": {"name": USER_AGENT, "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
+        sent |= {"mcp-protocol-version": MODERN, "mcp-method": method}
+    if params:
+        payload["params"] = params
+    return _post(request, url, payload, token, sent, headers)
+
+
+def _server_name(server: Mapping[str, Any]) -> str:
+    return " ".join(str(v) for v in (server.get("name"), server.get("version")) if v) or "unnamed server"
 
 
 def _initialize() -> dict[str, Any]:
@@ -221,8 +269,12 @@ def _check_sign_in(url: str, headers: Mapping[str, str], request: Request, add: 
     challenge = headers.get("www-authenticate", "")
     found = re.search(r'resource_metadata="([^"]+)"', challenge)
     parts = urlsplit(url)
-    metadata_url = found.group(1) if found else f"{parts.scheme}://{parts.netloc}/.well-known/oauth-protected-resource{parts.path}"
-    if found:
+    well_known = f"{parts.scheme}://{parts.netloc}/.well-known/oauth-protected-resource{parts.path}"
+    metadata_url = found.group(1) if found else well_known
+    if found and not _absolute(metadata_url):
+        add(Result("FAIL", "401 points to sign-in", f"resource_metadata is {metadata_url}, not an absolute address", "Send the full https address of the resource metadata"))
+        metadata_url = well_known
+    elif found:
         add(Result("PASS", "401 points to sign-in", "WWW-Authenticate names the resource metadata"))
     else:
         add(Result("WARN", "401 points to sign-in", "No resource_metadata in WWW-Authenticate", "Clients fall back to the well-known address; send resource_metadata in the challenge (RFC 9728)"))
@@ -244,6 +296,9 @@ def _check_sign_in(url: str, headers: Mapping[str, str], request: Request, add: 
 
 
 def _check_authorization_server(issuer: str, request: Request, add: Callable[[Result], None]) -> None:
+    if not _usable(issuer):
+        add(Result("FAIL", "Authorization server metadata", f"The issuer {issuer} isn't an https address", "List the issuer's full https address in authorization_servers"))
+        return
     parts = urlsplit(issuer)
     base, path = f"{parts.scheme}://{parts.netloc}", parts.path.rstrip("/")
     candidates = [  # RFC 8414 puts the well-known part before the issuer's path; OpenID after it
@@ -282,6 +337,11 @@ def _check_authorization_server(issuer: str, request: Request, add: Callable[[Re
         add(Result("WARN", "Clients can register themselves", "No registration_endpoint and no client ID metadata documents", "Each client must then be registered by hand; Claude and Cursor expect to register themselves"))
 
 
+def _absolute(address: str) -> bool:
+    parts = urlsplit(address)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
 def _usable(endpoint: object) -> bool:
     """An absolute https address (plain http only on this machine)."""
     if not isinstance(endpoint, str):
@@ -290,8 +350,8 @@ def _usable(endpoint: object) -> bool:
     return bool(parts.netloc) and (parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in LOOPBACK))
 
 
-def _check_get(url: str, request: Request, token: str | None, add: Callable[[Result], None]) -> None:
-    headers = {"Accept": "text/event-stream"}
+def _check_get(url: str, request: Request, token: str | None, session: Mapping[str, str], add: Callable[[Result], None]) -> None:
+    headers = {"Accept": "text/event-stream", **session}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
@@ -309,21 +369,21 @@ def _check_get(url: str, request: Request, token: str | None, add: Callable[[Res
         add(Result("WARN", "GET on the endpoint", f"HTTP {status}", "Answer GET with 405 or an event stream"))
 
 
-def _check_origin(url: str, request: Request, token: str | None, session: Mapping[str, str], add: Callable[[Result], None]) -> None:
-    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
-    status, _, _ = _post(request, url, ping, token, session, {"Origin": "https://example.invalid"})
+def _check_origin(url: str, request: Request, token: str | None, era: _Era, add: Callable[[Result], None]) -> None:
+    method = "server/discover" if era.modern else "ping"  # 2026-07-28 has no ping
+    status, _, _ = _call(request, url, token, era, method, 2, headers={"Origin": "https://example.invalid"})
     if status == 403:
         add(Result("PASS", "Refuses other websites", "A request from another site's page gets 403"))
     else:
         add(Result("WARN", "Refuses other websites", f"A request with Origin: https://example.invalid got HTTP {status}", "Check the Origin header, so another website's page can't call the server through a visitor's browser"))
 
 
-def _check_tools(url: str, request: Request, token: str | None, session: Mapping[str, str], add: Callable[[Result], None]) -> None:
+def _check_tools(url: str, request: Request, token: str | None, era: _Era, add: Callable[[Result], None]) -> None:
     tools: list[Any] = []
     cursor = None
     for page in range(MAX_PAGES):
         params = {"cursor": cursor} if cursor else {}
-        status, headers, body = _post(request, url, {"jsonrpc": "2.0", "id": 3 + page, "method": "tools/list", "params": params}, token, session)
+        status, headers, body = _call(request, url, token, era, "tools/list", 3 + page, params)
         result = _dict((_message(headers, body) or {}).get("result"))
         if status != 200 or not isinstance(result.get("tools"), list):
             add(Result("FAIL", "Lists tools", f"HTTP {status}: {_snippet(body)}" + (f" (page {page + 1})" if page else "")))

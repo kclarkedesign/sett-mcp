@@ -56,6 +56,8 @@ def serve(**options):
                 meta.update(options.get("metadata", {}))
                 return self.json({k: v for k, v in meta.items() if v is not None})
             if self.path == "/mcp":
+                if options.get("get_needs_session") and not self.headers.get("Mcp-Session-Id"):
+                    return self.reply(400, b"Missing session ID")
                 return self.reply(405, b"", [("Allow", "POST")])
             return self.reply(404)
 
@@ -77,6 +79,15 @@ def serve(**options):
                 if not options.get("any_origin"):
                     return self.reply(403)
             method = body.get("method")
+            era = options.get("era", "both")
+            modern = self.headers.get("Mcp-Protocol-Version") == "2026-07-28" and self.headers.get("Mcp-Method") == method
+            if modern and era == "legacy" or method == "initialize" and era == "modern":
+                return self.json({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32600, "message": "Bad Request"}}, 400)
+            if method == "server/discover" and modern:
+                result = {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": {}}, "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "acme", "version": "1"}}}
+                return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result})
+            if method == "server/discover":
+                return self.json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Missing session ID"}}, 400)
             if method == "initialize":
                 result = {"protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "acme", "version": "1"}}
                 session = "signed-in" if self.headers.get("Authorization") else "anonymous"
@@ -179,7 +190,7 @@ def test_thin_tools_and_any_origin_warn(server):
 
 
 def test_a_token_gets_its_own_session_on_a_server_that_also_allows_anonymous_use(server):
-    url, state = server()
+    url, state = server(era="legacy")
     results = statuses(check(url, token="good"))
     assert results["Token accepted"] == "PASS" and results["Lists tools"] == "PASS"
     assert state["sessions"] == ["signed-in"]
@@ -252,12 +263,12 @@ def test_a_connection_lost_after_initialize_is_reported_not_raised(server):
 
     def flaky(method, target, headers, body):
         calls.append(method)
-        if len(calls) > 1:
+        if len(calls) > 4:  # after the probe, discover, initialize and initialized
             raise ConnectionResetError("connection reset by peer")
         return check_module.http_request(method, target, headers, body)
 
     results = check(url, request=flaky)
-    assert statuses(results)["Initialize"] == "PASS"
+    assert statuses(results)["Protocol 2026-07-28"] == "PASS"
     assert statuses(results)["Connection"] == "FAIL"
 
 
@@ -278,13 +289,62 @@ def test_malformed_tools_are_reported_and_the_rest_still_checked(server):
     assert statuses(results)["Parameter descriptions"] == "PASS"
 
 
-def test_a_non_object_result_fails_initialize_cleanly(server):
+def test_a_non_object_result_fails_cleanly(server):
     url, _ = server()
 
     def odd(method, target, headers, body):
         return 200, {"content-type": "application/json"}, b'{"jsonrpc": "2.0", "id": 1, "result": ["x"]}'
 
-    assert statuses(check(url, request=odd))["Initialize"] == "FAIL"
+    assert statuses(check(url, request=odd))["Answers MCP requests"] == "FAIL"
+
+
+def test_a_server_offering_both_protocols_passes_both(server):
+    url, _ = server()
+    results = statuses(check(url))
+    assert results["Protocol 2026-07-28"] == "PASS" and results["Handshake protocol"] == "PASS"
+    assert results["Lists tools"] == "PASS" and results["Refuses other websites"] == "PASS"
+
+
+def test_a_2026_only_server_passes_and_warns_about_older_clients(server):
+    url, _ = server(era="modern")
+    results = check(url)
+    assert statuses(results)["Protocol 2026-07-28"] == "PASS" and statuses(results)["Handshake protocol"] == "WARN"
+    assert statuses(results)["Lists tools"] == "PASS"
+    assert not [r for r in results if r.status == "FAIL"]
+
+
+def test_a_handshake_only_server_still_passes(server):
+    url, _ = server(era="legacy")
+    results = check(url)
+    assert statuses(results)["Protocol 2026-07-28"] == "INFO" and statuses(results)["Handshake protocol"] == "PASS"
+    assert statuses(results)["Lists tools"] == "PASS"
+    assert not [r for r in results if r.status == "FAIL"]
+
+
+def test_the_get_probe_carries_the_session(server):
+    url, _ = server(era="legacy", get_needs_session=True)
+    assert statuses(check(url))["GET on the endpoint"] == "PASS"
+
+
+def test_a_relative_resource_metadata_link_fails_without_a_traceback():
+    def odd(method, target, headers, body):
+        if method == "POST":
+            return 401, {"www-authenticate": 'Bearer resource_metadata="relative/path"'}, b""
+        return 404, {}, b""
+
+    results = statuses(check("https://srv.example/mcp", request=odd))
+    assert results["401 points to sign-in"] == "FAIL" and results["Protected resource metadata"] == "FAIL"
+
+
+def test_an_issuer_that_is_not_an_https_address_fails(server):
+    def odd(method, target, headers, body):
+        if method == "POST":
+            return 401, {"www-authenticate": 'Bearer resource_metadata="https://srv.example/.well-known/oauth-protected-resource/mcp"'}, b""
+        if "oauth-protected-resource" in target:
+            return 200, {}, json.dumps({"resource": "https://srv.example/mcp", "authorization_servers": ["auth/v1"]}).encode()
+        return 404, {}, b""
+
+    assert statuses(check("https://srv.example/mcp", request=odd))["Authorization server metadata"] == "FAIL"
 
 
 @pytest.mark.parametrize("servers", [True, "https://x.example", [], [1]])

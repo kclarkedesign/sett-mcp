@@ -52,6 +52,8 @@ uvx sett-mcp check https://<your-project>.vercel.app/mcp
 uvx sett-mcp check https://<your-project>.vercel.app/mcp --token -   # also check the tools (asks for an access token)
 ```
 
+Each line says PASS, WARN, FAIL or INFO, with a fix under anything that needs one. Without a token it checks what a client needs before signing in. With `--token -` it asks for an access token (what you paste isn't shown, and it stays out of your shell history), then also checks both protocol versions clients use (the current 2026-07-28 one and the older handshake; this server answers both) and the tools.
+
 ### Who can sign in
 
 New sign-ups are off, so add people first. They sign in with GitHub (using the same email) or a link sent to their email:
