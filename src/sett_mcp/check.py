@@ -359,7 +359,7 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
             add(Result("FAIL", "Tools over the handshake", problem, f"Clients still on the handshake can't use the tools, though {MODERN} clients can"))
     if tools_status == 200:
         if token and open_first:
-            _check_open_with_token(url, request, era, handshake_ok, loopback, add)
+            _check_open_with_token(url, request, modern_ok, handshake_ok, loopback, add)
         elif token:
             add(Result("PASS", "Token accepted", "tools/list answered with it"))
         elif loopback:
@@ -391,28 +391,43 @@ def _handshake_tools(url: str, request: Request, token: str | None, era: _Era) -
     return f"Malformed: {'; '.join(malformed)}" if malformed else ""
 
 
-def _check_open_with_token(url: str, request: Request, era: _Era, handshake_ok: bool, loopback: bool, add: Callable[[Result], None]) -> None:
-    """The token worked; do the tools list without one too?"""
-    anonymous = _Era(modern=era.modern)
-    if not era.modern:  # the handshake needs a session of its own, without the token
-        status, headers, body = _post(request, url, _initialize(), None)
-        info = _dict((_message(headers, body, 1) or {}).get("result"))
-        if status != 200 or _handshake_problems(info, headers):
-            add(Result("PASS", "Token accepted", "tools/list answered with it"))
-            return
-        if headers.get("mcp-session-id"):
-            anonymous.headers["mcp-session-id"] = headers["mcp-session-id"]
-        anonymous.headers["mcp-protocol-version"] = str(info["protocolVersion"])
-        _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, None, anonymous.headers)
-    status, headers, body = _call(request, url, None, anonymous, "tools/list", 90)
-    if status == 200 and isinstance(_dict((_message(headers, body, 90) or {}).get("result")).get("tools"), list):
-        add(Result("INFO", "Token not needed", "The tools list without a token as well"))
+def _check_open_with_token(url: str, request: Request, modern_ok: bool, handshake_ok: bool, loopback: bool, add: Callable[[Result], None]) -> None:
+    """The token worked; do the tools list without one too, over any protocol the server offers?"""
+    open_over = []
+    if modern_ok and _lists_tools(request, url, _Era(modern=True)):
+        open_over.append(MODERN)
+    if handshake_ok:
+        anonymous = _anonymous_handshake(request, url)
+        if anonymous is not None and _lists_tools(request, url, anonymous):
+            open_over.append("the handshake")
+    if open_over:
+        add(Result("INFO", "Token not needed", f"The tools list without a token over {' and '.join(open_over)}"))
         if loopback:
             add(Result("INFO", "No sign-in required", "Fine on this machine"))
         else:
             add(Result("WARN", "No sign-in required", "Anyone who finds this address can list and call its tools", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
     else:
         add(Result("PASS", "Token accepted", "tools/list answered with it, and not without it"))
+
+
+def _anonymous_handshake(request: Request, url: str) -> _Era | None:
+    """A handshake session opened without the token, or None if the server won't open one."""
+    status, headers, body = _post(request, url, _initialize(), None)
+    info = _dict((_message(headers, body, 1) or {}).get("result"))
+    if status != 200 or not info or _handshake_problems(info, headers):
+        return None
+    era = _Era(modern=False)
+    if headers.get("mcp-session-id"):
+        era.headers["mcp-session-id"] = headers["mcp-session-id"]
+    era.headers["mcp-protocol-version"] = str(info["protocolVersion"])
+    _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, None, era.headers)
+    return era
+
+
+def _lists_tools(request: Request, url: str, era: _Era) -> bool:
+    """Whether tools/list answers without a token in this era."""
+    status, headers, body = _call(request, url, None, era, "tools/list", 90)
+    return status == 200 and isinstance(_dict((_message(headers, body, 90) or {}).get("result")).get("tools"), list)
 
 
 def _token_rejected(url: str, status: int, headers: Mapping[str, str], request: Request, add: Callable[[Result], None], *, check_sign_in: bool) -> None:
@@ -592,9 +607,10 @@ def _usable(endpoint: object) -> bool:
     try:
         parts = urlsplit(endpoint)
         host = parts.hostname
+        parts.port  # noqa: B018 (raises ValueError for a port that isn't a number in range)
     except ValueError:
         return False
-    return bool(parts.netloc) and (parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK))
+    return bool(host) and (parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK))
 
 
 def _same_resource(resource: str, url: str) -> bool:
@@ -824,6 +840,8 @@ def _tool_problem(tool: object, *, strict: bool) -> str:
     output = tool.get("outputSchema")
     if output is not None and not isinstance(output, dict):
         return "outputSchema isn't an object"
+    if not isinstance(schema.get("properties", {}), dict):
+        return "inputSchema properties must be an object"
     if strict:  # 2025-11-25 also constrains these
         for label, part in (("inputSchema", schema), ("outputSchema", output)):
             if part is None:

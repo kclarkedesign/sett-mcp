@@ -105,6 +105,8 @@ def serve(**options):
             if options.get("redirect_to"):
                 return self.reply(307, b"", [("Location", options["redirect_to"])])
             public = options.get("public", ()) and body.get("method") in options["public"]
+            if options.get("public_handshake_only") and self.headers.get("Mcp-Protocol-Version") != "2026-07-28":
+                public = True
             if options.get("auth") and not public and self.headers.get("Authorization") != "Bearer good":
                 challenge = 'Bearer error="invalid_token"'
                 if not options.get("no_challenge_link"):
@@ -910,3 +912,23 @@ def test_endless_pagination_over_the_handshake_fails(server):
     url, _ = server(handshake_endless=True)
     result = next(r for r in check(url) if r.name == "Tools over the handshake")
     assert result.status == "FAIL" and "50 pages" in result.detail
+
+
+def test_a_public_handshake_is_found_even_when_the_token_unlocks_2026(server):
+    url, _ = server(auth=True, public_handshake_only=True)
+    results = statuses(check(url, token="good"))
+    assert results["Token not needed"] == "INFO" and "Token accepted" not in results
+
+
+@pytest.mark.parametrize("era", ["modern", "both"])
+def test_list_properties_never_crash_on_any_protocol(server, era):
+    tools = [TOOLS[0], {"name": "acme_odd", "description": "Properties sent as a list, not an object.", "inputSchema": {"type": "object", "properties": []}}]
+    url, _ = server(era=era, tools=tools)
+    result = next(r for r in check(url) if r.name == "Tool definitions")
+    assert result.status == "FAIL" and "acme_odd" in result.detail
+
+
+@pytest.mark.parametrize("endpoint", ["https://:443/token", "https://auth.example:bad/token", "https://auth.example:99999/token"])
+def test_oauth_urls_need_a_host_and_a_valid_port(server, endpoint):
+    url, _ = server(auth=True, metadata={"token_endpoint": endpoint})
+    assert statuses(check(url))["Authorization server metadata"] == "FAIL"
