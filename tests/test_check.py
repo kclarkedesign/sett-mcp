@@ -105,6 +105,12 @@ def serve(**options):
             if options.get("redirect_to"):
                 return self.reply(307, b"", [("Location", options["redirect_to"])])
             public = options.get("public", ()) and body.get("method") in options["public"]
+            if "open_pairs" in options:  # which protocol's which method works without a token
+                kind = "modern" if self.headers.get("Mcp-Protocol-Version") == "2026-07-28" else "handshake"
+                method_ = body.get("method")
+                if method_ in ("notifications/initialized", "ping"):
+                    method_ = "initialize"
+                public = (kind, method_) in options["open_pairs"]
             if options.get("public_handshake_only") and self.headers.get("Mcp-Protocol-Version") != "2026-07-28":
                 public = True
             if options.get("handshake_rejects_token") and self.headers.get("Authorization") and self.headers.get("Mcp-Protocol-Version") != "2026-07-28":
@@ -675,9 +681,13 @@ def test_an_unsupported_handshake_version_fails(server, version):
 )
 def test_tool_definitions_the_handshake_rejects_fail(server, tool):
     tools = [TOOLS[0], {"name": "acme_odd", "description": "A tool with an odd schema somewhere.", **tool}]
-    url, _ = server(tools=tools)
+    url, _ = server(era="legacy", tools=tools)  # handshake only: its stricter rules apply to the tool list
     result = next(r for r in check(url) if r.name == "Tool definitions")
     assert result.status == "FAIL" and "acme_odd" in result.detail and "whole list" in result.fix
+
+    url, _ = server(tools=tools)  # both protocols: the handshake's own reply is checked with its rules
+    result = next(r for r in check(url) if r.name == "Tools over the handshake")
+    assert result.status == "FAIL" and "acme_odd" in result.detail
 
 
 def test_protected_resource_metadata_only_at_the_root_is_found(server):
@@ -991,4 +1001,55 @@ def test_a_media_type_that_only_starts_like_json_or_sse_fails(server, kind):
 
 def test_a_charset_parameter_is_fine(server):
     url, _ = server(content_type="application/json; charset=utf-8")
+    assert statuses(check(url))["Lists tools"] == "PASS"
+
+
+# --- Every combination of public and protected, over both protocols -------------------
+
+_MATRIX = [
+    {"md": md, "mt": mt, "hi": hi, "ht": ht}
+    for md in (True, False)
+    for mt in (True, False)
+    for hi in (True, False)
+    for ht in (True, False)
+]
+
+
+@pytest.mark.parametrize("token", [None, "good"])
+@pytest.mark.parametrize("case", _MATRIX, ids=lambda c: "".join(k if v else "-" for k, v in c.items()))
+def test_open_is_reported_exactly_when_some_protocol_lists_tools_without_a_token(server, monkeypatch, case, token):
+    """md/mt: 2026-07-28 discover/tools public; hi/ht: handshake initialize/tools public."""
+    pairs = set()
+    if case["md"]:
+        pairs.add(("modern", "server/discover"))
+    if case["mt"]:
+        pairs.add(("modern", "tools/list"))
+    if case["hi"]:
+        pairs.add(("handshake", "initialize"))
+    if case["ht"]:
+        pairs.add(("handshake", "tools/list"))
+    url, _ = server(auth=True, open_pairs=pairs)
+    results = check(url, token=token)
+    named = statuses(results)
+    # 2026-07-28 requests stand alone, so a public tools/list is enough; the handshake needs a session first.
+    expected_open = case["mt"] or (case["hi"] and case["ht"])
+    reported_open = "No sign-in required" in named
+    assert reported_open == expected_open, [(r.status, r.name, r.detail) for r in results]
+    if token and expected_open:
+        assert "Token accepted" not in named
+    if token and not expected_open:
+        assert named.get("Token accepted") == "PASS", [(r.status, r.name, r.detail) for r in results]
+    if not token and not expected_open:
+        assert named.get("Requires sign-in") == "PASS", [(r.status, r.name, r.detail) for r in results]
+
+
+def test_a_2026_only_shape_is_not_held_to_the_handshake_rules(server):
+    tools = [TOOLS[0], {"name": "acme_list", "description": "Returns a list, which 2026-07-28 allows as output.", "inputSchema": {"type": "object"}, "outputSchema": {"type": "array"}}]
+    url, _ = server(era="modern", tools=tools)
+    assert "Tool definitions" not in statuses(check(url))
+
+
+def test_a_stream_line_longer_than_one_read_is_joined(server, short_deadline):
+    long_tool = {**TOOLS[0], "description": "Searches contacts. " + "x" * 100_000}
+    url, _ = server(sse_open=True, tools=[long_tool])
     assert statuses(check(url))["Lists tools"] == "PASS"

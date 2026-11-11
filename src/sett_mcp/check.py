@@ -188,13 +188,18 @@ def _read_events(response: Any, id_: object) -> bytes:
     """An event stream up to and including the event that answers request `id_`."""
     kept: list[bytes] = []
     data: list[str] = []
+    partial = b""
     size = 0
     while size < MAX_BODY:
-        line = response.readline(65536)
-        if not line:
+        chunk = response.readline(65536)
+        if not chunk:
             break
-        kept.append(line)
-        size += len(line)
+        kept.append(chunk)
+        size += len(chunk)
+        partial += chunk
+        if not partial.endswith(b"\n"):  # a line longer than one read: keep reading it
+            continue
+        line, partial = partial, b""
         text = line.decode(errors="replace").rstrip("\r\n")
         if text.startswith("data:"):
             data.append(text[5:].removeprefix(" "))
@@ -282,8 +287,14 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     if headers.get(FINAL_URL):
         add(Result("INFO", "Redirect", f"{url} redirects to {headers[FINAL_URL]}", f"Clients follow it, but giving them {headers[FINAL_URL]} saves a round trip"))
 
+    tools_open_anyway = False
     if status == 401:
-        add(Result("PASS", "Requires sign-in", "Requests without a token get 401"))
+        # 2026-07-28 requests stand alone: a public tools/list exposes the tools even when discovery asks for a token.
+        tools_open_anyway = _lists_tools(request, url, modern_era)[0]
+        if tools_open_anyway and not token:
+            add(Result("WARN", "No sign-in required", f"tools/list answers without a token over {MODERN}, though server/discover asks for one", "Require the token on every request, not only on discovery"))
+        else:
+            add(Result("PASS", "Requires sign-in", "Requests without a token get 401"))
         _check_sign_in(url, headers, request, add)
         if not token:
             _check_get(url, request, None, {}, add)
@@ -346,26 +357,39 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
 
     era = modern_era if modern_ok else handshake_era  # what current clients use
     get_headers = handshake_era.headers if handshake_ok else {"mcp-protocol-version": MODERN}
-    tools_status, tools_headers = _check_tools(url, request, token, era, add, strict=handshake_ok)
+    tools_status, tools_headers = _check_tools(url, request, token, era, add, strict=not era.modern)
+    open_detail = ""
+    if tools_status == 401 and not token and era.modern and handshake_ok:
+        # 2026-07-28's tools need a token; the anonymous handshake session may still list them.
+        handshake_status, handshake_headers = _check_tools(url, request, None, handshake_era, add, strict=True)
+        if handshake_status == 200:
+            tools_status, era, open_detail = 200, handshake_era, f" over the handshake ({MODERN} asks for a token)"
+        else:
+            tools_headers = handshake_headers if handshake_status == 401 else tools_headers
+    elif tools_status == 401 and not token and not era.modern and _lists_tools(request, url, modern_era)[0]:
+        # The handshake's tools need a token, but 2026-07-28 requests stand alone and its tools/list is public.
+        modern_status, _ = _check_tools(url, request, None, modern_era, add, strict=False)
+        if modern_status == 200:
+            tools_status, era, open_detail = 200, modern_era, f" over {MODERN} (server/discover asks for a token, tools/list doesn't)"
     if tools_status in (401, 403):
         if token:  # the token was turned down where it matters
             _token_rejected(url, tools_status, tools_headers, request, add, check_sign_in=not signed_in_checked)
         else:  # discovery is public, the tools aren't: that's sign-in working
             _requires_sign_in(url, tools_headers, request, add, "Discovery is public; tools/list needs a token", not_checked)
         return
-    if tools_status == 200 and modern_ok and handshake_ok:
+    if tools_status == 200 and era.modern and handshake_ok:
         problem = _handshake_tools(url, request, token, handshake_era)
         if problem:
             add(Result("FAIL", "Tools over the handshake", problem, f"Clients still on the handshake can't use the tools, though {MODERN} clients can"))
     if tools_status == 200:
-        if token and open_first:
+        if token and (open_first or tools_open_anyway):
             _check_open_with_token(url, request, loopback, add, check_sign_in=not signed_in_checked)
         elif token:
             add(Result("PASS", "Token accepted", "tools/list answered with it"))
         elif loopback:
             add(Result("INFO", "No sign-in required", "Fine on this machine"))
         else:
-            add(Result("WARN", "No sign-in required", "Anyone who finds this address can list and call its tools", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
+            add(Result("WARN", "No sign-in required", f"Anyone who finds this address can list and call its tools{open_detail}", "Add sign-in before sharing it (Sett: deploy vercel --auth supabase)"))
     _check_get(url, request, token, get_headers, add)
     _check_origin(url, request, token, era, add)
 
@@ -377,6 +401,8 @@ def _handshake_tools(url: str, request: Request, token: str | None, era: _Era) -
     for page in range(MAX_PAGES):
         status, headers, body = _call(request, url, token, era, "tools/list", 60 + page, {"cursor": cursor} if cursor else {})
         result = _dict((_message(headers, body, 60 + page) or {}).get("result"))
+        if status == 401 and not token and page == 0:
+            return ""  # the handshake's tools ask for a token; 2026-07-28's didn't, which the verdict covers
         if status != 200 or not isinstance(result.get("tools"), list):
             return _why(status, headers, body)
         tools += result["tools"]
