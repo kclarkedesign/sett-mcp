@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -38,16 +39,45 @@ def serve(**options):
             self.wfile.write(body)
 
         def json(self, data, status=200, headers=()):
-            self.reply(status, json.dumps(data).encode(), [("Content-Type", "application/json"), *headers])
+            self.reply(status, json.dumps(data).encode(), [("Content-Type", options.get("content_type", "application/json")), *headers])
+
+        def stream_open(self, data):
+            """An event stream that stays open: the reply (unless pings_only), then pings forever."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            try:
+                if not options.get("pings_only"):
+                    self.wfile.write(f"data: {json.dumps(data)}\n\n".encode())
+                    self.wfile.flush()
+                for _ in range(600):
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                pass
+
+        def finish_result(self, result, modern):
+            """2026-07-28 results carry cacheScope, resultType and ttlMs; the handshake's don't."""
+            if modern and not options.get("incomplete_2026"):
+                result = {"cacheScope": "private", "resultType": "complete", "ttlMs": 0, **result}
+            return result
 
         def do_GET(self):
             base = f"http://127.0.0.1:{self.server.server_port}"
             state["authorizations"].append(self.headers.get("Authorization"))
             if options.get("redirect_to"):
                 return self.reply(302, b"", [("Location", options["redirect_to"])])
-            if self.path == "/.well-known/oauth-protected-resource/mcp":
-                return self.json({"resource": options.get("resource", f"{base}/mcp"), "authorization_servers": [f"{base}/auth/v1"]})
-            if self.path == "/.well-known/oauth-authorization-server/auth/v1":
+            prm_path = "/.well-known/oauth-protected-resource" + ("" if options.get("prm_root_only") else "/mcp")
+            if self.path == prm_path:
+                resource = base if options.get("resource_parent") else options.get("resource", f"{base}/mcp")
+                return self.json({"resource": resource, "authorization_servers": [options.get("issuer", f"{base}/auth/v1")]})
+            as_path = "/auth/v1/.well-known/oauth-authorization-server" if options.get("as_appended_only") else "/.well-known/oauth-authorization-server/auth/v1"
+            if options.get("as_5xx") and self.path == "/.well-known/oauth-authorization-server/auth/v1":
+                return self.reply(500, b"oops")
+            if options.get("as_5xx"):
+                as_path = "/.well-known/openid-configuration/auth/v1"
+            if self.path == as_path:
                 meta = {"issuer": f"{base}/auth/v1", "authorization_endpoint": f"{base}/auth/v1/oauth/authorize", "token_endpoint": f"{base}/auth/v1/oauth/token"}
                 if not options.get("no_pkce"):
                     meta["code_challenge_methods_supported"] = ["S256"]
@@ -55,7 +85,7 @@ def serve(**options):
                     meta["registration_endpoint"] = f"{base}/auth/v1/register"
                 meta.update(options.get("metadata", {}))
                 return self.json({k: v for k, v in meta.items() if v is not None})
-            if self.path == "/mcp":
+            if self.path == "/mcp" or (options.get("slash") and self.path == "/mcp/"):
                 if options.get("get_needs_session") and not self.headers.get("Mcp-Session-Id"):
                     return self.reply(400, b"Missing session ID")
                 return self.reply(405, b"", [("Allow", "POST")])
@@ -63,7 +93,9 @@ def serve(**options):
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            if self.path != "/mcp":
+            if options.get("slash") and self.path == "/mcp":  # mounted at /mcp/, as Starlette does
+                return self.reply(307, b"", [("Location", f"http://127.0.0.1:{self.server.server_port}/mcp/")])
+            if self.path != ("/mcp/" if options.get("slash") else "/mcp"):
                 return self.reply(404)
             state["authorizations"].append(self.headers.get("Authorization"))
             if options.get("redirect_to"):
@@ -73,8 +105,9 @@ def serve(**options):
                 challenge = 'Bearer error="invalid_token"'
                 if not options.get("no_challenge_link"):
                     base = f"http://127.0.0.1:{self.server.server_port}"
-                    challenge += f', resource_metadata="{base}/.well-known/oauth-protected-resource/mcp"'
-                return self.json({"error": "invalid_token"}, 401, [("WWW-Authenticate", challenge)])
+                    link = f"{base}/.well-known/oauth-protected-resource/mcp"
+                    challenge += f", resource_metadata={link}" if options.get("unquoted") else f', resource_metadata="{link}"'
+                return self.reply(401, b'{"error": "invalid_token"}', [("Content-Type", "application/json"), ("WWW-Authenticate", challenge)])
             if self.headers.get("Origin"):
                 state["origins"].append(self.headers["Origin"])
                 if not options.get("any_origin"):
@@ -86,13 +119,13 @@ def serve(**options):
                 return self.json({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32600, "message": "Bad Request"}}, 400)
             if method == "server/discover" and modern:
                 result = {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": {}}, "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "acme", "version": "1"}}}
-                return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result})
+                return self.json({"jsonrpc": "2.0", "id": body["id"], "result": self.finish_result(result, modern)})
             if method == "server/discover" and options.get("discover_error_200"):
                 return self.json({"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32601, "message": "Method not found"}})
             if method == "server/discover":
                 return self.json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Missing session ID"}}, 400)
             if method == "initialize":
-                result = {"protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "acme", "version": "1"}}
+                result = {"protocolVersion": options.get("handshake_version", "2025-11-25"), "capabilities": {}, "serverInfo": {"name": "acme", "version": "1"}}
                 session = "signed-in" if self.headers.get("Authorization") else "anonymous"
                 return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result}, headers=[("Mcp-Session-Id", session)])
             if method == "tools/list":
@@ -104,11 +137,15 @@ def serve(**options):
                     result = {"tools": pages[index]}
                     if index + 1 < len(pages):
                         result["nextCursor"] = str(index + 1)
-                    return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result})
-                if options.get("sse"):
-                    data = f"event: message\ndata: {json.dumps({'jsonrpc': '2.0', 'id': body['id'], 'result': {'tools': tools}})}\n\n"
+                    return self.json({"jsonrpc": "2.0", "id": body["id"], "result": self.finish_result(result, modern)})
+                reply = {"jsonrpc": "2.0", "id": body["id"], "result": self.finish_result({"tools": tools}, modern)}
+                if options.get("sse_open"):
+                    return self.stream_open(reply)
+                if options.get("sse"):  # pretty-printed across several data: lines, which SSE joins
+                    lines = "".join(f"data: {line}\n" for line in json.dumps(reply, indent=1).splitlines())
+                    data = f"event: message\n: a comment\n{lines}\n"
                     return self.reply(200, data.encode(), [("Content-Type", "text/event-stream")])
-                return self.json({"jsonrpc": "2.0", "id": body["id"], "result": {"tools": tools}})
+                return self.json(reply)
             if method == "ping":
                 return self.json({"jsonrpc": "2.0", "id": body["id"], "result": {}})
             return self.reply(202)
@@ -195,8 +232,8 @@ def test_thin_tools_and_any_origin_warn(server):
 def test_a_token_gets_its_own_session_on_a_server_that_also_allows_anonymous_use(server):
     url, state = server(era="legacy")
     results = statuses(check(url, token="good"))
-    assert results["Token accepted"] == "PASS" and results["Lists tools"] == "PASS"
-    assert state["sessions"] == ["signed-in"]
+    assert results["Lists tools"] == "PASS"
+    assert state["sessions"][0] == "signed-in"
 
 
 def test_a_redirect_never_carries_the_token_to_another_origin(server):
@@ -207,11 +244,26 @@ def test_a_redirect_never_carries_the_token_to_another_origin(server):
     assert target_state["authorizations"] == []
 
 
-def test_a_redirect_without_a_token_is_followed(server):
+def test_a_redirect_to_another_origin_is_not_followed_even_without_a_token(server):
     target, target_state = server()
     url, _ = server(redirect_to=target.replace("/mcp", "/.well-known/oauth-protected-resource/mcp"))
-    status, _, body = check_module.http_request("GET", url, {}, None)
-    assert status == 200 and b"authorization_servers" in body and target_state["authorizations"] == [None]
+    status, _, _ = check_module.http_request("GET", url, {}, None)
+    assert status == 302 and target_state["authorizations"] == []
+
+
+def test_a_same_origin_post_redirect_is_followed_as_clients_do(server):
+    url, _ = server(slash=True)
+    results = check(url)
+    named = statuses(results)
+    assert named["Redirect"] == "INFO" and named["Lists tools"] == "PASS"
+    assert not [r for r in results if r.status == "FAIL"]
+
+
+def test_the_address_given_is_kept_including_a_trailing_slash(server):
+    url, _ = server(slash=True)
+    results = check(url + "/")
+    assert results[0].detail == url + "/" and "Redirect" not in statuses(results)
+    assert not [r for r in results if r.status == "FAIL"]
 
 
 def test_an_endpoint_that_redirects_posts_fails_and_the_token_stays_put(server):
@@ -424,8 +476,9 @@ def test_an_unreachable_server_fails_cleanly():
     ("given", "expected"),
     [
         ("my-server.vercel.app", "https://my-server.vercel.app/mcp"),
-        ("https://My-Server.vercel.app/", "https://my-server.vercel.app/mcp"),
-        ("https://x.example/custom/path/", "https://x.example/custom/path"),
+        ("https://My-Server.vercel.app", "https://my-server.vercel.app/mcp"),
+        ("https://My-Server.vercel.app/", "https://my-server.vercel.app/"),
+        ("https://x.example/custom/path/", "https://x.example/custom/path/"),
     ],
 )
 def test_normalize(given, expected):
@@ -439,3 +492,330 @@ def test_report_exit_code():
     assert report([Result("PASS", "a"), Result("WARN", "b", "x", "fix it")], lines.append) == 0
     assert report([Result("FAIL", "c", "y", "fix")], lines.append) == 1
     assert any("-> fix it" in line for line in lines)
+
+
+# --- From the adversarial review ------------------------------------------------------
+
+
+@pytest.fixture
+def short_deadline(monkeypatch):
+    monkeypatch.setattr(check_module, "DEADLINE", 2.0)
+
+
+@pytest.mark.parametrize("pings_only", [False, True])
+def test_an_event_stream_left_open_never_hangs_the_check(server, short_deadline, pings_only):
+    url, _ = server(sse_open=True, pings_only=pings_only)
+    started = time.monotonic()
+    results = statuses(check(url))
+    assert time.monotonic() - started < 15
+    if pings_only:  # no reply ever came
+        assert results["Connection"] == "FAIL"
+    else:  # the reply came, then the stream stayed open: read up to the reply, as clients do
+        assert results["Lists tools"] == "PASS"
+
+
+def test_a_token_with_a_trailing_line_break_is_cleaned_up(server):
+    url, state = server(auth=True)
+    assert statuses(check(url, token="good\r\n"))["Token accepted"] == "PASS"
+    assert "Bearer good" in state["authorizations"]
+
+
+@pytest.mark.parametrize("token", ["“sk-secret-123”", "sk secret", "sk-secret\n123"])
+def test_a_token_a_header_cannot_carry_is_refused_and_never_printed(server, token):
+    url, state = server(auth=True)
+    lines = []
+    report(check(url, token=token), lines.append)
+    assert any("Token not sent" in line for line in lines)
+    assert not any("sk-secret" in line or "sk secret" in line for line in lines)
+    assert all(a is None for a in state["authorizations"])
+
+
+def test_a_pasted_bearer_prefix_is_dropped(server):
+    url, state = server(auth=True)
+    assert statuses(check(url, token="Bearer good"))["Token accepted"] == "PASS"
+    assert "Bearer good" in state["authorizations"] and "Bearer Bearer good" not in state["authorizations"]
+
+
+def test_the_token_is_never_printed_even_if_the_server_echoes_it(server):
+    def echo(method, target, headers, body):
+        return 500, {"content-type": "text/plain"}, f"bad token {headers.get('Authorization', '')}".encode()
+
+    lines = []
+    report(check("https://srv.example/mcp", token="sk-live-abc", request=echo), lines.append)
+    assert not any("sk-live-abc" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"protocolVersion": "2025-11-25\n", "capabilities": {}, "serverInfo": {"name": "a", "version": "1"}},
+        {"protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "a", "version": "1"}, "_session": "sé"},
+    ],
+)
+def test_server_values_a_header_cannot_carry_are_reported_not_raised(reply):
+    session = reply.pop("_session", "s1")
+
+    def odd(method, target, headers, body):
+        message = json.loads(body or b"{}")
+        if message.get("method") == "initialize":
+            data = {"jsonrpc": "2.0", "id": 1, "result": reply}
+            return 200, {"content-type": "application/json", "mcp-session-id": session}, json.dumps(data).encode()
+        return 400, {"content-type": "application/json"}, b"{}"
+
+    results = check("https://srv.example/mcp", request=odd)
+    assert statuses(results)["Handshake protocol"] == "FAIL"
+
+
+@pytest.mark.parametrize("address", ["https://[oops/x", "http://[oops/x", "https://auth..example/"])
+def test_unusable_addresses_from_a_server_are_reported_not_raised(address):
+    def odd(method, target, headers, body):
+        if method == "POST":
+            return 401, {"www-authenticate": f'Bearer resource_metadata="{address}"'}, b""
+        return 404, {}, b""
+
+    results = statuses(check("https://srv.example/mcp", request=odd))  # no traceback
+    assert results["Protected resource metadata"] == "FAIL"
+
+
+@pytest.mark.parametrize("address", ["https://[oops/x", "https://auth..example/"])
+def test_unusable_addresses_are_unusable_through_the_real_transport(address):
+    assert check_module.within_origin("https://srv.example/mcp", address) is False
+    with pytest.raises(check_module.TRANSPORT_ERRORS):
+        check_module.http_request("GET", address, {}, None)
+
+
+def test_a_redirect_to_an_unusable_address_is_reported_not_raised(server):
+    url, _ = server(redirect_to="http://[oops/x")
+    status, _, _ = check_module.http_request("GET", url, {}, None)
+    assert status == 302
+
+
+def test_an_unparseable_address_given_by_the_user_fails_cleanly():
+    assert statuses(check("https://[::1/mcp"))["Address"] == "FAIL"
+
+
+def test_an_open_server_checked_with_a_token_is_still_called_open(server):
+    url, _ = server()
+    results = statuses(check(url, token="anything-at-all"))
+    assert results["No sign-in required"] == "INFO" and results["Token not needed"] == "INFO"  # INFO: on this machine
+    assert "Token accepted" not in results
+
+
+@pytest.mark.parametrize("era", ["both", "modern"])
+def test_2026_replies_missing_required_fields_fail(server, era):
+    url, _ = server(era=era, incomplete_2026=True)
+    results = statuses(check(url))
+    assert results["Protocol 2026-07-28"] == "FAIL"
+
+
+def test_a_2026_tools_list_missing_required_fields_fails(server):
+    url, _ = server(era="modern")
+
+    def strip(method, target, headers, body):
+        status, found, raw = check_module.http_request(method, target, headers, body)
+        if body and json.loads(body).get("method") == "tools/list":
+            data = json.loads(raw)
+            for key in ("cacheScope", "resultType", "ttlMs"):
+                data["result"].pop(key, None)
+            raw = json.dumps(data).encode()
+        return status, found, raw
+
+    result = next(r for r in check(url, request=strip) if r.name == "Lists tools")
+    assert result.status == "FAIL" and "cacheScope" in result.detail
+
+
+def test_a_reply_with_the_wrong_content_type_fails(server):
+    url, _ = server(content_type="text/html")
+    result = next(r for r in check(url) if r.name == "Answers MCP requests")
+    assert result.status == "FAIL" and "text/html" in result.detail
+
+
+def test_a_rejected_token_on_protected_tools_is_reported_with_the_sign_in_checks(server):
+    url, _ = server(auth=True, public={"server/discover", "initialize", "notifications/initialized"})
+    results = statuses(check(url, token="expired"))
+    assert results["Token accepted"] == "FAIL" and results["Protected resource metadata"] == "PASS"
+    assert "Lists tools" not in results
+
+
+@pytest.mark.parametrize("version", ["2024-10-07", "garbage"])
+def test_an_unsupported_handshake_version_fails(server, version):
+    url, _ = server(era="legacy", handshake_version=version)
+    assert statuses(check(url))["Handshake protocol"] == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"inputSchema": {"type": "object", "required": "q"}},
+        {"inputSchema": {"type": "object"}, "outputSchema": {"type": "array"}},
+        {"inputSchema": {"type": "object", "properties": {"q": "string"}}},
+    ],
+)
+def test_tool_definitions_the_handshake_rejects_fail(server, tool):
+    tools = [TOOLS[0], {"name": "acme_odd", "description": "A tool with an odd schema somewhere.", **tool}]
+    url, _ = server(tools=tools)
+    result = next(r for r in check(url) if r.name == "Tool definitions")
+    assert result.status == "FAIL" and "acme_odd" in result.detail and "whole list" in result.fix
+
+
+def test_protected_resource_metadata_only_at_the_root_is_found(server):
+    url, _ = server(auth=True, prm_root_only=True, no_challenge_link=True)
+    results = statuses(check(url))
+    assert results["Protected resource metadata"] == "PASS"
+
+
+def test_an_unquoted_resource_metadata_link_is_read(server):
+    url, _ = server(auth=True, unquoted=True)
+    assert statuses(check(url))["401 points to sign-in"] == "PASS"
+
+
+def test_a_parent_resource_passes_as_the_sdk_client_accepts_it(server):
+    url, _ = server(auth=True, resource_parent=True)
+    result = next(r for r in check(url) if r.name == "Protected resource metadata")
+    assert result.status == "PASS" and "covers" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({"as_appended_only": True}, "FAIL"),  # a location the SDK's client never tries
+        ({"as_5xx": True}, "FAIL"),  # a server error stops a client's search
+    ],
+)
+def test_authorization_server_discovery_matches_the_sdk(server, options, expected):
+    url, _ = server(auth=True, **options)
+    assert statuses(check(url))["Authorization server metadata"] == expected
+
+
+def test_an_issuer_differing_by_a_trailing_slash_fails(server):
+    url, _ = server(auth=True)
+    base = url.removesuffix("/mcp")
+    url2, _ = server(auth=True, metadata={"issuer": f"{base}/auth/v1/"})
+    assert statuses(check(url2))["Authorization server metadata"] == "FAIL"
+
+
+def test_tool_names_with_dots_warn_and_invalid_ones_fail(server):
+    tools = [
+        {**TOOLS[0], "name": "acme.search"},
+        {**TOOLS[0], "name": "bad name"},
+        {**TOOLS[0], "name": "acme_ok\n"},
+    ]
+    url, _ = server(tools=tools)
+    lines = [r for r in check(url) if r.name == "Tool names"]
+    assert {r.status for r in lines} == {"FAIL", "WARN"}
+    assert "acme.search" in next(r.detail for r in lines if r.status == "WARN")
+
+
+def test_repeated_www_authenticate_headers_keep_the_metadata_link(server):
+    url, _ = server(auth=True)
+
+    def doubled(method, target, headers, body):
+        status, found, raw = check_module.http_request(method, target, headers, body)
+        if status == 401:
+            found = {**found, "www-authenticate": found["www-authenticate"] + ', Basic realm="gw"'}
+        return status, found, raw
+
+    assert statuses(check(url, request=doubled))["401 points to sign-in"] == "PASS"
+
+
+def test_multi_line_sse_data_is_joined(server):
+    url, _ = server(sse=True)
+    assert statuses(check(url))["Lists tools"] == "PASS"
+
+
+def test_after_token_not_sent_the_hint_does_not_repeat_add_token(server, monkeypatch):
+    url, _ = server(auth=True)
+    monkeypatch.setattr(check_module, "LOOPBACK", set())
+    hint = next(r for r in check(url, token="good") if r.name == "Tools not checked")
+    assert "https" in hint.detail
+
+
+def test_a_localhost_check_never_goes_through_a_proxy(server, monkeypatch):
+    url, _ = server(auth=True)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")  # nothing listens there
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    assert statuses(check(url, token="good"))["Token accepted"] == "PASS"
+
+
+def test_ctrl_c_exits_quietly(monkeypatch, capsys):
+    from sett_mcp import cli
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("getpass.getpass", interrupted)
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["check", "https://srv.example/mcp", "--token", "-"])
+    assert exit_.value.code == 130
+
+
+# --- Against the real MCP Python SDK --------------------------------------------------
+
+
+def _sdk_server(auth_issuer=None):
+    """A real MCPServer on a free port, optionally behind the SDK's own bearer-token check."""
+    mcp_server = pytest.importorskip("mcp.server.mcpserver")
+    uvicorn = pytest.importorskip("uvicorn")
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    options = {}
+    if auth_issuer:
+        from mcp.server.auth.provider import AccessToken
+        from mcp.server.auth.settings import AuthSettings
+
+        class Verifier:
+            async def verify_token(self, token):
+                return AccessToken(token=token, client_id="test", scopes=[]) if token == "good" else None
+
+        options = {"token_verifier": Verifier(), "auth": AuthSettings(issuer_url=auth_issuer, resource_server_url=f"http://127.0.0.1:{port}/mcp")}
+    app = mcp_server.MCPServer("sdk-demo", **options)
+
+    @app.tool()
+    def echo(text: str) -> str:
+        """Echo the text back to the caller, for testing."""
+        return text
+
+    config = uvicorn.Config(app.streamable_http_app(), host="127.0.0.1", port=port, log_level="error")
+    srv = uvicorn.Server(config)
+    thread = threading.Thread(target=srv.run, daemon=True)
+    thread.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    return srv, f"http://127.0.0.1:{port}/mcp"
+
+
+def test_a_real_sdk_server_passes_both_protocols():
+    srv, url = _sdk_server()
+    try:
+        results = check(url)
+    finally:
+        srv.should_exit = True
+    named = statuses(results)
+    assert named["Protocol 2026-07-28"] == "PASS" and named["Handshake protocol"] == "PASS"
+    assert named["Lists tools"] == "PASS"
+    assert not [r for r in results if r.status == "FAIL"], [r for r in results if r.status == "FAIL"]
+
+
+def test_a_real_sdk_server_with_sign_in(server):
+    fake, _ = server()  # serves the authorization server's metadata at /auth/v1
+    issuer = fake.removesuffix("/mcp") + "/auth/v1"
+    srv, url = _sdk_server(auth_issuer=issuer)
+    try:
+        anonymous = statuses(check(url))
+        signed_in = check(url, token="good")
+        rejected = statuses(check(url, token="bad"))
+    finally:
+        srv.should_exit = True
+    assert anonymous["Requires sign-in"] == "PASS" and anonymous["Protected resource metadata"] == "PASS"
+    assert anonymous["Authorization server metadata"] == "PASS"
+    named = statuses(signed_in)
+    assert named["Token accepted"] == "PASS" and named["Lists tools"] == "PASS"
+    assert not [r for r in signed_in if r.status == "FAIL"], [r for r in signed_in if r.status == "FAIL"]
+    assert rejected["Token accepted"] == "FAIL"
