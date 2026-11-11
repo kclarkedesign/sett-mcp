@@ -26,20 +26,20 @@ Answers to section 10:
 4. **Writer role:** a callable only in v1. Move `StderrAuditSink` and `SupabaseAuditSink` into `policy.py`; they need only the standard library and `anyio`. Keep `jwt` in `remote.py`.
 5. **FastMCP 3.x:** no.
 6. **Where this lives:** here, `docs/design/fastmcp-adapter.md`, versioned with the code. The roadmap links to it.
-7. **Replay within the TTL (decided 2026-11-11):** document it, and recommend `RequestStateSecurity(ttl=120)` in the README for servers with non-idempotent writes. Whether `check(mcp)` can read the server's TTL to warn about a long one is untested, so don't promise it.
+7. **Replay (decided 2026-11-11, revised the same day after Codex's review of #27):** make a confirmation **single-use per instance**: a random nonce in the request state, consumed on first presentation (`spikes/fastmcp-middleware/replay.py`). Also recommend `RequestStateSecurity(ttl=120)` in the README. Protection across replicas needs a shared store; that is an extension point, not built in v1. The first version of this decision was to document the replay and rely on a short `ttl`; Codex pointed out that a short `ttl` only narrows the window. Whether `check(mcp)` can read the server's TTL to verify `replay_window` is untested, so don't promise it.
 
 ---
 
 ## Spike results (2026-11-11)
 
-**Go.** FastMCP 4's middleware can run Sett's confirmation on both protocol versions, so Option A stands and the §4 fallback is not needed. Code and raw output: [`spikes/fastmcp-middleware/`](../../spikes/fastmcp-middleware/) (`spike.py`, `last-run.txt`, `RESULTS.md`). Tested on fastmcp 4.1.8 and mcp 2.3.0, Python 3.14 only.
+**Go.** FastMCP 4's middleware can run Sett's confirmation on both protocol versions, so Option A stands and the §4 fallback is not needed. Code and raw output: [`spikes/fastmcp-middleware/`](../../spikes/fastmcp-middleware/) (`spike.py`, `last-run.txt`, `capabilities.py`, `replay.py`, `RESULTS.md`). Tested on fastmcp 4.1.8 and mcp 2.3.0, Python 3.14 only.
 
 | Question | Answer |
 |---|---|
 | **8a** Can middleware return `InputRequiredToolResult`? | Yes. The round trip completes with `Client(mode="auto")`: two middleware rounds, handler called once, the tool ran only after `accept`. `decline` and `cancel` ran nothing and reported distinct messages. The old protocol works from the same middleware. |
 | **8b** How to read client capabilities? | `ctx.session.client_capabilities`, on both eras (per request on 2026-07-28). Check for *form* support **up front** on both (§4 has the exact test: presence of `elicitation` alone isn't enough, since a URL-only client has it set). Without a check, a client with no handler fails safe but with its own raw `MCPError: Elicitation not supported` and no audit entry. |
 | **8c** Empty form on the old protocol? | Don't use `ctx.elicit()`: an empty dataclass or model sends a top-level `title`, which Codex rejects. Use `await ctx.session.elicit_form(message, {"type": "object", "properties": {}})`. |
-| **8d** Does the SDK already bind the confirmation? | Yes: it seals `(tool, args digest, principal)` plus a TTL (600 s) and audience into `request_state`, and refuses a replay with other arguments. It does **not** refuse an accept that carries no state, so the middleware must require its marker. It does **not** make a state single-use either (risk 9). |
+| **8d** Does the SDK already bind the confirmation? | Yes: it seals `(tool, args digest, principal)` plus a TTL (600 s) and audience into `request_state`, and refuses a replay with other arguments. It does **not** refuse an accept that carries no state, so the middleware must require its marker. It does **not** make a state single-use either (risk 9; the per-instance fix is in §4 and `replay.py`). |
 
 ---
 
@@ -139,11 +139,12 @@ def acme_delete_contact(contact_id: str) -> dict: ...
   2. For writes: run the writer check (`writer_check(get_access_token())`), then the placeholder check. Both use shared refusal text.
   3. If confirmation is needed:
      - **Capability check, both eras, before anything else:** read `ctx.session.client_capabilities` and test for *form* support: `e = caps.elicitation if caps else None`, then `e is not None and (e.form is not None or e.url is None)`. A client that declares only `url` can't show our form, while an empty `elicitation: {}` counts as form (the spec's backward-compatibility rule). If the test fails, audit `blocked` and raise `ToolError` "can't carry a confirmation prompt". Don't use the SDK's `check_client_capability` for this: it only checks that `elicitation` is present, so it lets a URL-only client through (`spikes/fastmcp-middleware/capabilities.py`). The spike showed that without any check a modern client with no handler gets its own raw `MCPError` and no audit entry.
-     - **2026-07-28:** if `ctx.input_responses["sett_confirm"]` is present and `ctx.request_state == MARKER`, read its `action`. If responses arrive without the marker, refuse: that is a forged accept, and the SDK doesn't catch it. Otherwise return `InputRequiredToolResult(InputRequiredResult(input_requests={"sett_confirm": ElicitRequest(form, empty schema)}, request_state=MARKER))`. The asking round writes no audit entry, matching Sett.
+     - **2026-07-28:** if `ctx.input_responses["sett_confirm"]` is present and `ctx.request_state` is `sett-confirm-v1:<nonce>` with a nonce not seen before (consume it now), read its `action`. If responses arrive without that prefix, refuse: that is a forged accept, and the SDK doesn't catch it. If the nonce was already used, refuse: that is a replay. Otherwise return `InputRequiredToolResult(InputRequiredResult(input_requests={"sett_confirm": ElicitRequest(form, empty schema)}, request_state=f"sett-confirm-v1:{nonce}"))` with a fresh random `nonce`. The asking round writes no audit entry, matching Sett.
      - **Older protocol:** send the form with `ctx.session.elicit_form(text, {"type": "object", "properties": {}})`, not `ctx.elicit(...)`, which adds a top-level `title` that Codex rejects (spike 8c).
      - Then: `accept` runs the tool, `decline` raises `ToolError` "declined", `cancel` raises "cancelled", each with an audit entry.
   4. Time `call_next`, audit `ok` or `error`, then mask `structured_content` and every JSON `TextContent`. Never mask an `InputRequiredToolResult`.
-- **`MARKER`:** a constant string, for example `"sett-confirm-v1"`. The SDK already seals `(tool, args digest, principal)` plus a TTL and audience into `request_state`, as the spec says servers SHOULD ([MRTR][mrtr]), so a confirmation for `delete c1` can't be replayed for `delete c2` (spike 8d). The marker's only job is to refuse an "accept" that arrives with no state, which the SDK lets through.
+- **Request state `sett-confirm-v1:<nonce>`:** the SDK already seals `(tool, args digest, principal)` plus a TTL and audience into `request_state`, as the spec says servers SHOULD ([MRTR][mrtr]), so a confirmation for `delete c1` can't be replayed for `delete c2` (spike 8d). Our part is the prefix and a random nonce: the prefix is how we refuse an "accept" that arrives with no state (the SDK lets it through), and the nonce makes the confirmation single-use (next bullet).
+- **Single-use, per instance (`replay.py`):** on the first presentation of a state, whatever the answer, add its nonce to an in-memory dict that expires entries after `replay_window` (default 600 s, the SDK's default `ttl`). A nonce already in the dict is refused ("this confirmation was already used. Ask again.", audit outcome `refused`). Check and insert have no `await` between them, so two concurrent presentations are atomic on one event loop. Limits, all shown by the spike: it is per instance, so with several replicas a replay sent to another instance still runs; `replay_window` must be at least the server's `RequestStateSecurity(ttl=...)`, or a late replay gets through; and a restart empties the set (with a persistent state key, pre-restart states stay valid). A shared store (Redis, or a unique-key insert in Supabase) is the extension point for multi-replica servers: a small `ReplayStore` protocol with the in-memory store as the default. Not built in v1.
 - **`check(mcp)`:** an async helper for startup and tests. It lists tools, validates `confirm_message` placeholders against each tool's parameters (raising `ValueError`, as Sett does), and logs which tools are visible versus hidden.
 
 ## 5. What's shared with `guardrails.py` and what's reimplemented
@@ -180,7 +181,7 @@ sett-mcp/
 │  └─ guardrails.py        imports from .policy; re-exports Policy, PolicyError, MASK
 ├─ packages/sett-fastmcp/
 │  ├─ pyproject.toml       sett-fastmcp; deps: fastmcp>=4.1,<5, pyyaml>=6; dev: pytest, anyio
-│  ├─ README.md            quick start, annotation rules, multi-instance key, short `ttl` advice, gaps
+│  ├─ README.md            quick start, annotation rules, multi-instance key, short `ttl` advice, per-instance replay protection, gaps
 │  ├─ src/sett_fastmcp/
 │  │  ├─ __init__.py       Policy, PolicyError, MASK, AuditSink, SettMiddleware, check
 │  │  ├─ _policy.py        copy of template policy.py (CI-enforced)
@@ -217,12 +218,12 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 4. Tools from `create_proxy(...)` are treated as destructive even when upstream says `read_only_hint=True`, unless trust is opted into.
 5. A forged first round (`inputResponses` with accept and no request state) is **refused** and doesn't run. The SDK lets it through, so this is our own check (spike 8d).
 6. Request state from a call with different arguments is refused, and the tool doesn't run. The SDK does this itself (spike 8d), so this is a regression test.
-7. **Multiple instances:** two `FastMCP` servers share one `RequestStateSecurity` key. Round 1 goes to A and round 2 to B with the sealed state, and the tool runs. With different keys it's refused. This drives raw rounds through the SDK v2 client, as Sett's `test_http` does.
+7. **Multiple instances:** two `FastMCP` servers share one `RequestStateSecurity` key. Round 1 goes to A and round 2 to B with the sealed state, and the tool runs. With different keys it's refused. (`replay.py` R6a already confirms the shared-key positive path; the different-keys case is still untested.) This drives raw rounds through the SDK v2 client, as Sett's `test_http` does.
 8. Tools reached through other paths still go through the middleware: a tool called from another tool, and a search/code-mode transform if FastMCP ships one.
 9. Ordering: with `ResponseCachingMiddleware` added after Sett, a hidden write is never served from cache.
 10. `writer_check` with a `StaticTokenVerifier` token: a reader is `forbidden`, a writer is allowed, and the audit entry carries `subject` and `client_id`.
 11. `check(mcp)` raises on an unknown `confirm_message` placeholder.
-12. A genuine confirmation state used a second time: the SDK doesn't refuse it (spike 8d). Pin the documented behavior (open question 7): a state can be used again within its TTL.
+12. Single-use: a genuine state presented a second time is refused and the tool body doesn't run, whether the second presentation is sequential, concurrent, or an accept after a decline on the same state (spike: `replay.py` R1-R3). Also pin the limits as documented behavior, not guarantees: a replay sent to a different instance runs (R6c), and a replay after `replay_window` but inside the SDK `ttl` runs (R5).
 13. Capability matrix for the up-front check: no `elicitation` (blocked), `elicitation: {}` (allowed: form by the backward-compatibility rule), `form` only (allowed), `url` only (blocked), `form` and `url` (allowed). The predicate is already checked against the SDK's capability models in `spikes/fastmcp-middleware/capabilities.py`; the real test should also drive a URL-only client end to end, which the spike did not.
 
 **CI:**
@@ -244,8 +245,8 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
    - (a) Yes: a middleware-returned `InputRequiredToolResult` completes a round trip with `Client(mode="auto")`.
    - (b) `ctx.session.client_capabilities`. A modern client with no handler shows `None`; if the server asks anyway, the client answers with its own `MCPError: Elicitation not supported`. So check up front, for form support and not just presence (§4).
    - (c) `ctx.session.elicit_form` with a plain dict. An empty dataclass or model through `ctx.elicit` adds a `title`.
-   - (d) Yes: tool, argument digest, principal, TTL (600 s) and audience, per [RequestStateSecurity][rss]. A constant marker is enough on our side.
-9. **A confirmation can be replayed within its TTL (observed in the spike).** Using the same genuine `request_state` a second time ran the tool body again; neither the SDK nor the middleware refused it. Whoever holds the state (the client) can re-run that exact call for up to 10 minutes. For a non-idempotent write such as `create_contact` that means a duplicate. It's stateless by design, so the middleware alone can't fix it. Decided (open question 7): document it and recommend `RequestStateSecurity(ttl=120)`.
+   - (d) Yes: tool, argument digest, principal, TTL (600 s) and audience, per [RequestStateSecurity][rss]. On our side a prefix refuses a stateless accept, and a nonce makes the confirmation single-use (risk 9).
+9. **A confirmation can be replayed within its TTL (observed in the spike).** Using the same genuine `request_state` a second time ran the tool body again; neither the SDK nor the middleware refused it. Whoever holds the state (the client) can re-run that exact call for up to 10 minutes. For a non-idempotent write such as `create_contact` that means a duplicate. The SDK's state is stateless by design, so single-use needs memory on our side. Decided (open question 7): a per-instance single-use nonce (`replay.py`: sequential reuse, decline-then-accept and concurrent replays are all refused), plus a README recommendation of `RequestStateSecurity(ttl=120)`. Residual risks, all shown by the spike: with several replicas and no shared store, a replay sent to another instance still runs (R6c); `replay_window` must be at least the server's `ttl` (R5); a restart empties the set.
 
 ## 9. Sequence
 
@@ -263,7 +264,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 4. **Writer role:** take a callable only (recommended), or also read Sett's `<PREFIX>_WRITER_CLAIM`/`_WRITER_VALUE` env vars for parity with remote mode? And should `StderrAuditSink`/`SupabaseAuditSink` move into `policy.py` so FastMCP users get them? They're stdlib-only, but `remote.py` imports `jwt` at the top.
 5. **FastMCP 3.x** (still maintained, on SDK v1): support it? Recommendation: no. It's a different SDK and has no 2026-07-28 confirmation path.
 6. **Where this doc lives:** `docs/design/fastmcp-adapter.md` in the repo, or the Sett brief in Second Brain?
-7. **Replay within the TTL (new, from the spike):** a genuine confirmation can be used twice inside its TTL (600 s default). Options: recommend a short `RequestStateSecurity(ttl=120)` in the README for servers with non-idempotent writes; require idempotent writes; or accept it and document it. **Decided 2026-11-11:** document it and recommend the short `ttl`. Whether `check(mcp)` can read the server's `RequestStateSecurity` to warn about a long one is untested.
+7. **Replay within the TTL (new, from the spike):** a genuine confirmation can be used twice inside its TTL (600 s default). Options: recommend a short `RequestStateSecurity(ttl=120)` in the README for servers with non-idempotent writes; require idempotent writes; or accept it and document it. **Decided 2026-11-11, revised after Codex's review of #27:** single-use per instance (a nonce in the request state, consumed on first use), plus the short-`ttl` advice. A shared replay store for multi-replica servers is an extension point, not v1. Whether `check(mcp)` can read the server's `RequestStateSecurity` to warn about a long one is untested.
 
 ## 11. Verification (when built)
 - `uv run --extra dev pytest` in `packages/sett-fastmcp` passes on the matrix, on both protocol eras.

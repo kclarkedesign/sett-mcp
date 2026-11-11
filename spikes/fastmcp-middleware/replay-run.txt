@@ -1,0 +1,8 @@
+﻿[PASS] R1 same state twice: runs=['c1']; 1st='ok: {"id":"c1"}'; 2nd='error: delete_contact was not run: this confirmation was already used. Ask again.'
+[PASS] R2 decline then accept, same state: runs=['c1']; decline='error: delete_contact was not run: not confirmed.'; accept='error: delete_contact was not run: this confirmation was already used. Ask again.'
+[PASS] R3 two concurrent presentations: ran 1 time(s); ['ok: {"id":"c3"}', 'error: delete_contact was not run: this confirmation was already used. Ask again.']
+[PASS] R4 a fresh ask gives a fresh, working nonce: runs=['c1', 'c3', 'c1']
+[INFO] R5 replay after our window, inside the SDK ttl: runs=['c1', 'c1']; late replay='ok: {"id":"c1"}' (a second run means the window must be >= the SDK ttl)
+[PASS] R6a round 1 on A, round 2 on B (shared key): B runs=['c1']; 'ok: {"id":"c1"}'
+[PASS] R6b replay to the same instance (B): 'error: delete_contact was not run: this confirmation was already used. Ask again.'
+[INFO] R6c replay to the OTHER instance (A): A runs=['c1']; 'ok: {"id":"c1"}' (a run here is the per-instance limit: A never saw this nonce)
