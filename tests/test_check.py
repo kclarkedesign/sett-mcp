@@ -135,6 +135,11 @@ def serve(**options):
             if method == "notifications/initialized":
                 state["initialized"].add(self.headers.get("Mcp-Session-Id"))
             if method == "tools/list" and not modern:
+                if options.get("handshake_tools_malformed"):
+                    bad = [*TOOLS, {"name": "acme_odd", "description": "Malformed only over the handshake.", "inputSchema": {"type": "object", "required": "q"}}]
+                    return self.json({"jsonrpc": "2.0", "id": body["id"], "result": {"tools": bad}})
+                if options.get("handshake_endless"):
+                    return self.json({"jsonrpc": "2.0", "id": body["id"], "result": {"tools": TOOLS, "nextCursor": "again"}})
                 if options.get("handshake_tools_broken"):
                     return self.json({"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32600, "message": "Bad session"}}, 400)
                 if options.get("strict_lifecycle") and self.headers.get("Mcp-Session-Id") not in state["initialized"]:
@@ -893,3 +898,15 @@ def test_a_resource_differing_only_in_path_case_fails(server):
 def test_a_resource_differing_only_in_scheme_case_passes(server):
     url, _ = server(auth=True, resource_host_upper=True)
     assert statuses(check(url))["Protected resource metadata"] == "PASS"
+
+
+def test_malformed_tools_over_the_handshake_fail(server):
+    url, _ = server(handshake_tools_malformed=True)
+    result = next(r for r in check(url) if r.name == "Tools over the handshake")
+    assert result.status == "FAIL" and "acme_odd" in result.detail
+
+
+def test_endless_pagination_over_the_handshake_fails(server):
+    url, _ = server(handshake_endless=True)
+    result = next(r for r in check(url) if r.name == "Tools over the handshake")
+    assert result.status == "FAIL" and "50 pages" in result.detail

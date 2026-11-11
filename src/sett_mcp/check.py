@@ -372,18 +372,23 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
 
 def _handshake_tools(url: str, request: Request, token: str | None, era: _Era) -> str:
     """Why tools/list over the handshake session fails, or "" when it works."""
+    tools: list[Any] = []
     cursor = None
     for page in range(MAX_PAGES):
         status, headers, body = _call(request, url, token, era, "tools/list", 60 + page, {"cursor": cursor} if cursor else {})
         result = _dict((_message(headers, body, 60 + page) or {}).get("result"))
         if status != 200 or not isinstance(result.get("tools"), list):
             return _why(status, headers, body)
+        tools += result["tools"]
         cursor = result.get("nextCursor")
         if cursor is not None and not isinstance(cursor, str):
             return "nextCursor isn't text"
         if not cursor:
-            return ""
-    return ""
+            break
+    else:
+        return f"nextCursor still set after {MAX_PAGES} pages, so clients would keep asking"
+    malformed = [f"{_label(t, i)} ({problem})" for i, t in enumerate(tools) if (problem := _tool_problem(t, strict=True))]
+    return f"Malformed: {'; '.join(malformed)}" if malformed else ""
 
 
 def _check_open_with_token(url: str, request: Request, era: _Era, handshake_ok: bool, loopback: bool, add: Callable[[Result], None]) -> None:
