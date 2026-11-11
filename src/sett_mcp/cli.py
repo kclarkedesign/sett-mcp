@@ -1,7 +1,8 @@
-"""`sett-mcp new` and `sett-mcp update`: Copier, pointed at the Sett template.
+"""`sett-mcp new`, `update` and `check`.
 
-    uvx sett-mcp new my-server
+    uvx sett-mcp new my-server                         # Copier, pointed at the Sett template
     cd my-server && uvx sett-mcp update
+    uvx sett-mcp check https://my-server.vercel.app/mcp  # test a deployed server before sharing it
 """
 
 from __future__ import annotations
@@ -32,11 +33,34 @@ def main(argv: list[str] | None = None) -> None:
     update.add_argument("directory", nargs="?", default=".", help="project to update (default: current folder)")
     update.add_argument("--defaults", action="store_true", help="keep previous answers without asking")
 
+    check = commands.add_parser("check", help="test a deployed MCP server the way clients will")
+    check.add_argument("url", help="the server's MCP address, e.g. https://my-server.vercel.app/mcp")
+    check.add_argument(
+        "--token",
+        metavar="-",
+        help="check the tools too, with an OAuth access token issued for this server; give `-` to be asked for it "
+        "(it stays out of your shell history). Never a Supabase or other admin key",
+    )
+
     for command in (new, update):
         command.add_argument("--ref", help="template version (git tag or branch); default: latest release")
         command.add_argument("--template", default=TEMPLATE, help=argparse.SUPPRESS)  # for testing
 
     args = parser.parse_args(argv)
+    if args.command == "check":
+        import getpass
+
+        from sett_mcp.check import check as run_check
+        from sett_mcp.check import report
+
+        if hasattr(sys.stdout, "reconfigure"):  # a Windows console can't print every character a server sends
+            sys.stdout.reconfigure(errors="replace")
+        try:
+            token = getpass.getpass("Access token: ") if args.token == "-" else args.token
+            sys.exit(report(run_check(args.url, token=token or None)))
+        except KeyboardInterrupt:
+            print()
+            sys.exit(130)
     try:
         if args.command == "new":
             data = dict(_pair(item) for item in args.data)
