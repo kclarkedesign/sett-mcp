@@ -1,0 +1,16 @@
+# Keeps the GitHub Actions versions current, in this repo's workflows and in the ones
+# every new project gets (template/.github/workflows). One grouped PR a month, labelled
+# ci so it lands under Maintenance in the release notes. Security fixes for Python
+# dependencies come separately, from Dependabot security updates (repo settings).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories: ["/", "/template"]
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [ci]
+    commit-message:
+      prefix: ci
