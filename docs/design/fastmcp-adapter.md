@@ -26,6 +26,7 @@ Answers to section 10:
 4. **Writer role:** a callable only in v1. Move `StderrAuditSink` and `SupabaseAuditSink` into `policy.py`; they need only the standard library and `anyio`. Keep `jwt` in `remote.py`.
 5. **FastMCP 3.x:** no.
 6. **Where this lives:** here, `docs/design/fastmcp-adapter.md`, versioned with the code. The roadmap links to it.
+7. **Replay within the TTL (decided 2026-11-11):** document it, and recommend `RequestStateSecurity(ttl=120)` in the README for servers with non-idempotent writes. Whether `check(mcp)` can read the server's TTL to warn about a long one is untested, so don't promise it.
 
 ---
 
@@ -179,7 +180,7 @@ sett-mcp/
 │  └─ guardrails.py        imports from .policy; re-exports Policy, PolicyError, MASK
 ├─ packages/sett-fastmcp/
 │  ├─ pyproject.toml       sett-fastmcp; deps: fastmcp>=4.1,<5, pyyaml>=6; dev: pytest, anyio
-│  ├─ README.md            quick start, annotation rules, multi-instance key, gaps
+│  ├─ README.md            quick start, annotation rules, multi-instance key, short `ttl` advice, gaps
 │  ├─ src/sett_fastmcp/
 │  │  ├─ __init__.py       Policy, PolicyError, MASK, AuditSink, SettMiddleware, check
 │  │  ├─ _policy.py        copy of template policy.py (CI-enforced)
@@ -221,7 +222,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 9. Ordering: with `ResponseCachingMiddleware` added after Sett, a hidden write is never served from cache.
 10. `writer_check` with a `StaticTokenVerifier` token: a reader is `forbidden`, a writer is allowed, and the audit entry carries `subject` and `client_id`.
 11. `check(mcp)` raises on an unknown `confirm_message` placeholder.
-12. A genuine confirmation state used a second time: the SDK doesn't refuse it (spike 8d). Pin whatever we decide for open question 7.
+12. A genuine confirmation state used a second time: the SDK doesn't refuse it (spike 8d). Pin the documented behavior (open question 7): a state can be used again within its TTL.
 
 **CI:**
 - matrix of Python 3.10/3.13 × fastmcp `4.1.*` (floor) and latest. fastmcp 4.1.8 and `mcp` 2.3.0 declare `Requires-Python >=3.10`, but the spike ran on 3.14 only
@@ -243,7 +244,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
    - (b) `ctx.session.client_capabilities`. A modern client with no handler shows `None`; if the server asks anyway, the client answers with its own `MCPError: Elicitation not supported`. So check up front.
    - (c) `ctx.session.elicit_form` with a plain dict. An empty dataclass or model through `ctx.elicit` adds a `title`.
    - (d) Yes: tool, argument digest, principal, TTL (600 s) and audience, per [RequestStateSecurity][rss]. A constant marker is enough on our side.
-9. **A confirmation can be replayed within its TTL (observed in the spike).** Using the same genuine `request_state` a second time ran the tool body again; neither the SDK nor the middleware refused it. Whoever holds the state (the client) can re-run that exact call for up to 10 minutes. For a non-idempotent write such as `create_contact` that means a duplicate. It's stateless by design, so the middleware alone can't fix it. See open question 7.
+9. **A confirmation can be replayed within its TTL (observed in the spike).** Using the same genuine `request_state` a second time ran the tool body again; neither the SDK nor the middleware refused it. Whoever holds the state (the client) can re-run that exact call for up to 10 minutes. For a non-idempotent write such as `create_contact` that means a duplicate. It's stateless by design, so the middleware alone can't fix it. Decided (open question 7): document it and recommend `RequestStateSecurity(ttl=120)`.
 
 ## 9. Sequence
 
@@ -261,7 +262,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 4. **Writer role:** take a callable only (recommended), or also read Sett's `<PREFIX>_WRITER_CLAIM`/`_WRITER_VALUE` env vars for parity with remote mode? And should `StderrAuditSink`/`SupabaseAuditSink` move into `policy.py` so FastMCP users get them? They're stdlib-only, but `remote.py` imports `jwt` at the top.
 5. **FastMCP 3.x** (still maintained, on SDK v1): support it? Recommendation: no. It's a different SDK and has no 2026-07-28 confirmation path.
 6. **Where this doc lives:** `docs/design/fastmcp-adapter.md` in the repo, or the Sett brief in Second Brain?
-7. **Replay within the TTL (new, from the spike):** a genuine confirmation can be used twice inside its TTL (600 s default). Options: recommend a short `RequestStateSecurity(ttl=120)` in the README for servers with non-idempotent writes; require idempotent writes; or accept it and document it. Recommendation: document it and recommend the short `ttl`. Whether `check(mcp)` can read the server's `RequestStateSecurity` to warn about a long one is untested.
+7. **Replay within the TTL (new, from the spike):** a genuine confirmation can be used twice inside its TTL (600 s default). Options: recommend a short `RequestStateSecurity(ttl=120)` in the README for servers with non-idempotent writes; require idempotent writes; or accept it and document it. **Decided 2026-11-11:** document it and recommend the short `ttl`. Whether `check(mcp)` can read the server's `RequestStateSecurity` to warn about a long one is untested.
 
 ## 11. Verification (when built)
 - `uv run --extra dev pytest` in `packages/sett-fastmcp` passes on the matrix, on both protocol eras.
