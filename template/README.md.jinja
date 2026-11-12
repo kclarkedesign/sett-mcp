@@ -97,7 +97,7 @@ It is a pattern match, so it can miss and it can over-match. Treat it as a safet
 - **It leaves alone** dates, order and invoice numbers (`4471-2290`), ZIP codes, version numbers and plain runs of digits. That keeps useful text readable, and it means a number written as a plain run of digits is missed.
 - **It also misses** a number with an extension (`555-0101x22`), one with an unusual layout, an address with non-English letters in the domain, and every other kind of personal data (names, street addresses, card or ID numbers).
 
-The same hiding applies in tool results, the audit log and the confirmation prompt. A write that sends `[masked]` back inside one of these fields is refused, as with whole-field masking, so the model can't overwrite the real text with the placeholder. A field listed in both `mask_fields` and `mask_patterns` is hidden whole. Without a `mask_patterns` section nothing is scanned, and a typo in it (`feilds`, `kinds: [emial]`) fails at startup.
+The same hiding applies in tool results, the audit log and the confirmation prompt, including a custom `confirm_message` that uses one of these fields. (A custom message is yours to write, so it shows a field from `mask_fields` as it is: leave those out of it.) A write that sends `[masked]` back inside one of these fields is refused, as with whole-field masking, so the model can't overwrite the real text with the placeholder. A field listed in both `mask_fields` and `mask_patterns` is hidden whole. Without a `mask_patterns` section nothing is scanned, and a typo in it (`feilds`, `kinds: [emial]`) fails at startup.
 
 | Variable | Purpose | Default |
 |---|---|---|

@@ -455,7 +455,7 @@ class Guardrails:
             if capabilities is None or capabilities.elicitation is None:
                 return _ClientCannotConfirm()
             if message:
-                text = message.format(**arguments)
+                text = message.format(**self._message_arguments(arguments))
             else:
                 given = {k: v for k, v in arguments.items() if v is not None}  # skip unset optionals
                 shown = ", ".join(f"{k}={v!r}" for k, v in self._policy.mask(given).items())
@@ -501,6 +501,21 @@ class Guardrails:
         )
         run.__annotations__ = {**hints, "confirmation": confirmation_type}
         return run
+
+    def _message_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The arguments a custom `confirm_message` is formatted from.
+
+        Email addresses and phone numbers in a pattern-masked field are hidden here too, so the
+        prompt can't show what results and the audit log hide. Everything else is shown as the
+        tool's author wrote the message to show it.
+        """
+        fields, kinds = self._policy.mask_pattern_fields, self._policy.mask_pattern_kinds
+        if not fields:
+            return arguments
+        return {
+            name: mask({name: value}, frozenset(), fields, kinds)[name] if name.lower() in fields else value
+            for name, value in arguments.items()
+        }
 
     def _may_write(self) -> bool:
         return self._writer_check is None or self._writer_check(get_access_token())

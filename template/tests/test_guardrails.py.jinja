@@ -296,6 +296,11 @@ def notes_server(**policy):
         saved.append(note.notes)
         return {"id": "n1"}
 
+    @guard.write(name="replace_note", destructive=True, confirm_message="Replace note {note_id} with: {notes}")
+    def replace_note(note_id: str, notes: str) -> dict:
+        saved.append(notes)
+        return {"id": note_id}
+
     return server, saved
 
 
@@ -343,6 +348,21 @@ async def test_the_audit_log_holds_the_masked_text(tmp_path):
     assert saved == ["reach me at ada@example.org"]  # the tool itself gets the real text
     (row,) = [json.loads(line) for line in log.read_text().splitlines()]
     assert row["arguments"]["notes"] == "reach me at [masked]"
+
+
+async def test_a_custom_confirmation_message_shows_listed_free_text_masked_too():
+    # Codex, round 1: only the generic prompt was masked, so {notes} in a custom message leaked.
+    server, saved = notes_server(**LISTED)
+    prompts = []
+
+    async def callback(context, params):
+        prompts.append(params.message)
+        return ElicitResult(action="accept", content={})
+
+    async with Client(server, elicitation_callback=callback) as client:
+        await client.call_tool("replace_note", {"note_id": "n1", "notes": "reach me at ada@example.org"})
+    assert prompts == ["Replace note n1 with: reach me at [masked]"]
+    assert saved == ["reach me at ada@example.org"]  # what is written is still the real text
 
 
 async def test_the_confirmation_prompt_shows_the_masked_text():
