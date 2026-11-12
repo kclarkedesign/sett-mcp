@@ -18,6 +18,7 @@ guardrails:
   - changed-files:
       - any-glob-to-any-file:
           - "template/src/*/guardrails.py"
+          - "template/src/*/policy.py"
           - "template/src/*/default_policy.yaml.jinja"
 docs:
   - changed-files:

@@ -5,6 +5,7 @@ MCP server on the official Python SDK v2 (`mcp>=2.3`, `MCPServer`, not v1's `Fas
 ## Layout
 - `src/{{ package_name }}/tools.py`: the tools. Every tool is registered through `guard.read(...)` or `guard.write(...)`.
 - `src/{{ package_name }}/guardrails.py`: the safety layer (write gate, confirmations, allow/deny, masking, audit). Change it only deliberately.
+- `src/{{ package_name }}/policy.py` + `tests/test_policy.py`: the half of the safety layer that doesn't need the MCP SDK (the policy file, masking, confirmation and refusal texts, the audit log). It must not import `mcp` or `mcp_types`, and must not use relative imports, so it can be reused as it is by a layer for another framework.
 - `src/{{ package_name }}/store.py`: sample data backend; replace with the real API client.
 - `src/{{ package_name }}/default_policy.yaml`: bundled policy.
 - `tests/test_guardrails.py`: behavior tests through a real MCP client.

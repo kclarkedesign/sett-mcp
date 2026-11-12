@@ -1,0 +1,144 @@
+"""The framework-free half of the guardrails (policy.py).
+
+policy.py is meant to be reused by a layer for another framework, so these tests pin what that
+needs: no MCP SDK import, the same texts and form the SDK layer uses, and an audit log that
+behaves the same wherever it is called from. The SDK layer itself is tested in test_guardrails.py.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import logging
+from pathlib import Path
+
+import pytest
+
+from {{ package_name }} import guardrails, policy
+from {{ package_name }}.policy import (
+    CONFIRM_FORM,
+    MASK,
+    AuditLog,
+    Policy,
+    blocked_text,
+    cancelled_text,
+    check_confirm_message,
+    confirm_text,
+    declined_text,
+    forbidden_text,
+    placeholder_text,
+)
+
+
+class Recorder:
+    def __init__(self) -> None:
+        self.entries: list[dict] = []
+
+    async def write(self, entry: dict) -> None:
+        self.entries.append(entry)
+
+
+class Broken:
+    async def write(self, entry: dict) -> None:
+        raise RuntimeError("sink is down")
+
+
+def test_policy_module_does_not_import_the_mcp_sdk():
+    imports = [
+        node
+        for node in ast.walk(ast.parse(Path(policy.__file__).read_text(encoding="utf-8")))
+        if isinstance(node, ast.Import | ast.ImportFrom)
+    ]
+    assert imports
+    for node in imports:
+        if isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "a relative import would stop the file working as a copy"
+            modules = [node.module or ""]
+        else:
+            modules = [alias.name for alias in node.names]
+        assert not {m.split(".")[0] for m in modules} & {"mcp", "mcp_types"}, modules
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "MASK", "MAX_CLIENT_TEXT", "PATTERN_KINDS", "_TRUTHY", "AuditSink", "ConfirmMode", "PatternKind",
+        "Policy", "PolicyError", "mask", "_holds_mask", "_untrusted",
+    ],
+)
+def test_guardrails_still_exports_what_moved(name):
+    assert getattr(guardrails, name) is getattr(policy, name)
+
+
+def test_the_sdk_confirmation_form_is_the_shared_form():
+    assert guardrails.Confirmation.model_json_schema() == CONFIRM_FORM
+
+
+def test_confirm_text_fills_in_the_tools_own_message():
+    assert confirm_text(Policy(), "t", "Delete {contact_id}?", {"contact_id": "c1"}) == "Delete c1?"
+
+
+def test_confirm_text_lists_only_the_arguments_given_and_masks_them():
+    text = confirm_text(
+        Policy(mask_fields=frozenset({"email"})), "t", None, {"name": "Ada", "email": "ada@example.org", "phone": None}
+    )
+    assert text == f"Allow t(name='Ada', email={MASK!r})?"
+
+
+@pytest.mark.parametrize("message", [None, "Add {notes}?"])
+def test_confirm_text_hides_personal_data_in_pattern_fields(message):
+    text = confirm_text(
+        Policy(mask_pattern_fields=frozenset({"notes"})), "t", message, {"notes": "call 555-010-1234 or ada@example.org"}
+    )
+    assert "555" not in text and "example.org" not in text
+    assert text.count(MASK) == 2
+
+
+def test_check_confirm_message_names_the_unknown_argument():
+    check_confirm_message("t", "Delete {contact_id}?", {"contact_id", "other"})
+    with pytest.raises(ValueError, match=r"confirm_message for t names unknown arguments: \['nope'\]"):
+        check_confirm_message("t", "Delete {nope}?", {"contact_id"})
+
+
+@pytest.mark.parametrize("text", [blocked_text, cancelled_text, declined_text, forbidden_text, placeholder_text])
+def test_refusals_say_which_tool_was_not_run(text):
+    assert text("some_tool").startswith("some_tool was not run: ")
+
+
+def test_audit_log_is_off_without_a_file_or_a_sink():
+    assert not AuditLog(Policy()).enabled
+    assert AuditLog(Policy(audit_path=Path("audit.jsonl"))).enabled
+    assert AuditLog(Policy(), [Recorder()]).enabled
+
+
+@pytest.mark.anyio
+async def test_audit_log_writes_one_masked_line_with_the_callers_extras(tmp_path):
+    path = tmp_path / "logs" / "audit.jsonl"
+    log = AuditLog(Policy(audit_path=path, mask_fields=frozenset({"email"})))
+    await log.record("t", "write", {"email": "ada@example.org", "name": "Ada"}, "ok", 0.0123, {"subject": "u1"})
+    (line,) = path.read_text(encoding="utf-8").splitlines()
+    entry = json.loads(line)
+    assert list(entry) == ["time", "tool", "kind", "outcome", "duration_ms", "arguments", "subject"]
+    assert entry["arguments"] == {"email": MASK, "name": "Ada"}
+    assert entry["duration_ms"] == 12.3
+    assert "ada@example.org" not in line
+
+
+@pytest.mark.anyio
+async def test_audit_log_fails_open_and_still_reaches_the_sinks(tmp_path, caplog):
+    (tmp_path / "blocker").write_text("a file where a folder should be")
+    sink = Recorder()
+    log = AuditLog(Policy(audit_path=tmp_path / "blocker" / "audit.jsonl"), [sink])
+    with caplog.at_level(logging.ERROR):
+        await log.record("t", "read", {}, "ok", 0.0)
+    assert "Could not write audit log" in caplog.text
+    assert [e["tool"] for e in sink.entries] == ["t"]
+
+
+@pytest.mark.anyio
+async def test_a_failing_sink_never_fails_the_call_or_the_sinks_after_it(caplog):
+    after = Recorder()
+    with caplog.at_level(logging.ERROR):
+        await AuditLog(Policy(), [Broken(), after]).record("t", "read", {}, "ok", 0.0)
+    assert "Broken" in caplog.text
+    assert [e["tool"] for e in after.entries] == ["t"]

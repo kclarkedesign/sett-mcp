@@ -155,7 +155,7 @@ def acme_delete_contact(contact_id: str) -> dict: ...
 | `MASK`, `mask()`, `_holds_mask()` | `guardrails.py` | **Shared** |
 | Confirmation prompt text (`confirm_message.format`; generic `Allow tool(k=v)?`, masked, unset values skipped) | inline in `resolver` | **Extract `confirm_text()` and share it** |
 | Refusal messages (blocked / cancelled / declined / forbidden / placeholder) | inline strings | **Extract and share**, so error text is identical |
-| Audit entry, JSONL write that fails open, `AuditSink` protocol, sink fan-out | `Guardrails._audit` | **Extract an `Audit` class and share it.** The caller passes `subject`/`client_id`, because each framework reads the token differently |
+| Audit entry, JSONL write that fails open, `AuditSink` protocol, sink fan-out | `Guardrails._audit` | **Extract an `AuditLog` class and share it** (not `Audit`, which is the policy file's own `audit:` model). The caller passes `extra` (`subject`, `client_id`, client name), because each framework reads the token differently |
 | Empty form schema (no `title`; Codex rejects one) | `Confirmation` model | **Share as a plain dict**, sent with `ctx.session.elicit_form` (spike 8c: `ctx.elicit` adds a `title`) |
 | Registration, `Resolve`/`Elicit` signature synthesis, worker-thread sync tools | `Guardrails.read/write` | SDK only. FastMCP already runs sync tools in a threadpool |
 | Annotation-based kind, list filtering, era-branch confirmation, request-state binding, `ToolResult` masking | — | FastMCP only (`middleware.py`) |
@@ -252,7 +252,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 ## 9. Sequence
 
 1. **Spike: done 2026-11-11, go** (`spikes/fastmcp-middleware/`). The fallback in §4 is not needed.
-2. **Extract `policy.py`** in the template (`confirm_text`, refusal text, `Audit`). No behavior change: the existing template CI must pass unchanged.
+2. **Extract `policy.py`** in the template (`confirm_text`, refusal text, `AuditLog`). No behavior change: the existing template CI must pass unchanged.
 3. **Build `sett-fastmcp`**: middleware, `check()`, the tests in §7 and the drift check.
 4. **Docs and release**: package README, a README section in Sett ("Using FastMCP?"), the client-support column and the publish workflow.
 5. **Later, on demand**: a template `framework` option, and a policy-schema extension if open question 2 lands.
