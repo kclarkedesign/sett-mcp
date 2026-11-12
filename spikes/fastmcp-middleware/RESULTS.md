@@ -42,6 +42,17 @@ Codex pointed out that documenting the replay and shortening the `ttl` only narr
 - **Side result.** R6a: round 1 on instance A and round 2 on instance B, with the same state key, completes and the tool runs once. Planned test 7's positive path works.
 - **Not covered:** behavior across a restart, and what real clients do on a retry (the Cursor retry in Sett's client table is not reproduced here).
 
+## Response caching and writes (after Codex review of PR #18)
+
+Codex warned that FastMCP's `ResponseCachingMiddleware` could serve a cached success for a repeated write. `caching.py` runs a Sett-style confirmation middleware with the cache in both orders on both protocol versions, calling a confirmed and an unconfirmed write twice with identical arguments (output: `caching-run.txt`; 4 UNSAFE, 4 SAFE of 8). Codex was right in substance; its mechanism was only half right.
+
+- **Old protocol, confirmed write:** cached, then skipped. Sett outermost: prompted twice, handler ran once, caller saw success twice. Cache outermost: the second call was not prompted at all (confirmation bypassed).
+- **New protocol, confirmed write:** fine in both orders. The cache bypasses multi-round-trip continuation legs (source: `_is_continuation_leg`), and the write runs on one, so it is never cached. Codex missed this.
+- **Unconfirmed write, either protocol:** the handler ran once for two calls (`confirm: off`, or a non-destructive write, is the real-world version).
+- **Fix verified:** with the write tools in `call_tool_settings={"excluded_tools": [...]}`, all four era-and-order combinations ran the handler twice and asked twice.
+- **For `check(mcp)`:** `mcp.middleware` exposes the stack and the cache's call-tool settings are readable, but only via the private `_call_tool_settings`.
+- **Not covered:** the audit entry (the spike's middleware has none; Codex's `ok` claim is plausible but unmeasured), `enabled: False`, resources and prompts.
+
 ## Environment note
 
 `uv` could not download a managed Python here (`invalid peer certificate: UnknownIssuer` from github.com). Using the installed Python and `--system-certs` worked. No certificate checks were bypassed.

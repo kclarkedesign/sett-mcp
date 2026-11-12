@@ -32,7 +32,7 @@ Answers to section 10:
 
 ## Spike results (2026-11-11)
 
-**Go.** FastMCP 4's middleware can run Sett's confirmation on both protocol versions, so Option A stands and the §4 fallback is not needed. Code and raw output: [`spikes/fastmcp-middleware/`](../../spikes/fastmcp-middleware/) (`spike.py`, `last-run.txt`, `capabilities.py`, `replay.py`, `RESULTS.md`). Tested on fastmcp 4.1.8 and mcp 2.3.0, Python 3.14 only.
+**Go.** FastMCP 4's middleware can run Sett's confirmation on both protocol versions, so Option A stands and the §4 fallback is not needed. Code and raw output: [`spikes/fastmcp-middleware/`](../../spikes/fastmcp-middleware/) (`spike.py`, `last-run.txt`, `capabilities.py`, `replay.py`, `caching.py`, `RESULTS.md`). Tested on fastmcp 4.1.8 and mcp 2.3.0, Python 3.14 only.
 
 | Question | Answer |
 |---|---|
@@ -145,7 +145,7 @@ def acme_delete_contact(contact_id: str) -> dict: ...
   4. Time `call_next`, audit `ok` or `error`, then mask `structured_content` and every JSON `TextContent`. Never mask an `InputRequiredToolResult`.
 - **Request state `sett-confirm-v1:<nonce>`:** the SDK already seals `(tool, args digest, principal)` plus a TTL and audience into `request_state`, as the spec says servers SHOULD ([MRTR][mrtr]), so a confirmation for `delete c1` can't be replayed for `delete c2` (spike 8d). Our part is the prefix and a random nonce: the prefix is how we refuse an "accept" that arrives with no state (the SDK lets it through), and the nonce makes the confirmation single-use (next bullet).
 - **Single-use, per instance (`replay.py`):** on the first presentation of a state, whatever the answer, add its nonce to an in-memory dict that expires entries after `replay_window` (default 600 s, the SDK's default `ttl`). A nonce already in the dict is refused ("this confirmation was already used. Ask again.", audit outcome `refused`). Check and insert have no `await` between them, so two concurrent presentations are atomic on one event loop. Limits, all shown by the spike: it is per instance, so with several replicas a replay sent to another instance still runs; `replay_window` must be at least the server's `RequestStateSecurity(ttl=...)`, or a late replay gets through; and a restart empties the set (with a persistent state key, pre-restart states stay valid). A shared store (Redis, or a unique-key insert in Supabase) is the extension point for multi-replica servers: a small `ReplayStore` protocol with the in-memory store as the default. Not built in v1.
-- **`check(mcp)`:** an async helper for startup and tests. It lists tools, validates `confirm_message` placeholders against each tool's parameters (raising `ValueError`, as Sett does), and logs which tools are visible versus hidden.
+- **`check(mcp)`:** an async helper for startup and tests. It lists tools, validates `confirm_message` placeholders against each tool's parameters (raising `ValueError`, as Sett does), logs which tools are visible versus hidden, and fails when a `ResponseCachingMiddleware` in the stack could cache a write tool (risk 10).
 
 ## 5. What's shared with `guardrails.py` and what's reimplemented
 
@@ -181,7 +181,7 @@ sett-mcp/
 │  └─ guardrails.py        imports from .policy; re-exports Policy, PolicyError, MASK
 ├─ packages/sett-fastmcp/
 │  ├─ pyproject.toml       sett-fastmcp; deps: fastmcp>=4.1,<5, pyyaml>=6; dev: pytest, anyio
-│  ├─ README.md            quick start, annotation rules, multi-instance key, short `ttl` advice, per-instance replay protection, gaps
+│  ├─ README.md            quick start, annotation rules, multi-instance key, short `ttl` advice, per-instance replay protection, caching rule, gaps
 │  ├─ src/sett_fastmcp/
 │  │  ├─ __init__.py       Policy, PolicyError, MASK, AuditSink, SettMiddleware, check
 │  │  ├─ _policy.py        copy of template policy.py (CI-enforced)
@@ -220,7 +220,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 6. Request state from a call with different arguments is refused, and the tool doesn't run. The SDK does this itself (spike 8d), so this is a regression test.
 7. **Multiple instances:** two `FastMCP` servers share one `RequestStateSecurity` key. Round 1 goes to A and round 2 to B with the sealed state, and the tool runs. With different keys it's refused. (`replay.py` R6a already confirms the shared-key positive path; the different-keys case is still untested.) This drives raw rounds through the SDK v2 client, as Sett's `test_http` does.
 8. Tools reached through other paths still go through the middleware: a tool called from another tool, and a search/code-mode transform if FastMCP ships one.
-9. Ordering: with `ResponseCachingMiddleware` added after Sett, a hidden write is never served from cache.
+9. Response caching (spike: `caching.py`, 8 cases). FastMCP's `ResponseCachingMiddleware` caches `tools/call` results by tool name and arguments and bypasses the cache only on multi-round-trip continuation legs. Without an exclusion it is unsafe for writes in either order. Old protocol: a confirmed write is cached, and a later identical call is prompted but not executed (Sett outermost) or not even prompted (cache outermost). New protocol: a confirmed write is fine, but an unconfirmed one (`confirm: off`, or a non-destructive write) is skipped on its second call. With the write tools in `call_tool_settings={"excluded_tools": [...]}`, all four era-and-order combinations ran the handler and asked every time. The real test: two identical enabled writes per case, confirmed and unconfirmed, on both eras, with the cache excluding them (handler runs twice, prompts twice); and `check(mcp)` rejecting a stack where the cache could cache a write tool.
 10. `writer_check` with a `StaticTokenVerifier` token: a reader is `forbidden`, a writer is allowed, and the audit entry carries `subject` and `client_id`.
 11. `check(mcp)` raises on an unknown `confirm_message` placeholder.
 12. Single-use: a genuine state presented a second time is refused and the tool body doesn't run, whether the second presentation is sequential, concurrent, or an accept after a decline on the same state (spike: `replay.py` R1-R3). Also pin the limits as documented behavior, not guarantees: a replay sent to a different instance runs (R6c), and a replay after `replay_window` but inside the SDK `ttl` runs (R5).
@@ -230,7 +230,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 - matrix of Python 3.10/3.13 × fastmcp `4.1.*` (floor) and latest. fastmcp 4.1.8 and `mcp` 2.3.0 declare `Requires-Python >=3.10`, but the spike ran on 3.14 only
 - a weekly scheduled run with prereleases allowed, to catch 4.2 and 5.0 early (FastMCP has shipped a major roughly every six months)
 - the drift check
-- **Real-client smoke test** (manual, before release): Claude Code, Cursor, Codex and claude.ai on a FastMCP sample server. Record the results in a FastMCP column of the client-support table.
+- **Real-client smoke test** (manual, before release): Claude Code, Claude Desktop, Cursor, Codex and claude.ai on a FastMCP sample server, local and remote. Claude Desktop's local bridge drops confirmation prompts, so for a local server the expected result is the clear `blocked` refusal with nothing run; a remote connector should show the prompt (see Sett's client-support table). Record the results in a FastMCP column of the client-support table.
 
 ## 8. Gaps and risks
 
@@ -247,6 +247,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
    - (c) `ctx.session.elicit_form` with a plain dict. An empty dataclass or model through `ctx.elicit` adds a `title`.
    - (d) Yes: tool, argument digest, principal, TTL (600 s) and audience, per [RequestStateSecurity][rss]. On our side a prefix refuses a stateless accept, and a nonce makes the confirmation single-use (risk 9).
 9. **A confirmation can be replayed within its TTL (observed in the spike).** Using the same genuine `request_state` a second time ran the tool body again; neither the SDK nor the middleware refused it. Whoever holds the state (the client) can re-run that exact call for up to 10 minutes. For a non-idempotent write such as `create_contact` that means a duplicate. The SDK's state is stateless by design, so single-use needs memory on our side. Decided (open question 7): a per-instance single-use nonce (`replay.py`: sequential reuse, decline-then-accept and concurrent replays are all refused), plus a README recommendation of `RequestStateSecurity(ttl=120)`. Residual risks, all shown by the spike: with several replicas and no shared store, a replay sent to another instance still runs (R6c); `replay_window` must be at least the server's `ttl` (R5); a restart empties the set.
+10. **Response caching and writes (Codex review of #18, verified in `caching.py`).** FastMCP's `ResponseCachingMiddleware` caches by tool name and arguments, so a write whose handler is skipped on a repeat call still reports success to the caller. Rule: write tools must be excluded from call caching (`call_tool_settings={"excluded_tools": [...]}`; the source also has `enabled: False`, untested), whatever the middleware order. Sett outermost is necessary but not sufficient. `check(mcp)` can enforce it: `mcp.middleware` lists the stack and the cache's settings are readable, but only through a private attribute (`_call_tool_settings`), so that check may break on a FastMCP upgrade and needs its own test. The README must state the rule. Resources and prompts are not covered, same as masking.
 
 ## 9. Sequence
 
@@ -269,7 +270,7 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 ## 11. Verification (when built)
 - `uv run --extra dev pytest` in `packages/sett-fastmcp` passes on the matrix, on both protocol eras.
 - The template's `test-template.yml` passes unchanged after the `policy.py` extraction, and the drift diff is empty.
-- A manual run of the FastMCP sample with `fastmcp dev` / MCP Inspector, then the real-client smoke test (Claude Code, Cursor, Codex, claude.ai).
+- A manual run of the FastMCP sample with `fastmcp dev` / MCP Inspector, then the real-client smoke test (Claude Code, Claude Desktop, Cursor, Codex, claude.ai; local and remote), where Claude Desktop on a local server must show the `blocked` refusal and run nothing.
 
 ## Sources
 
