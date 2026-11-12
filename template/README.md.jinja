@@ -84,7 +84,7 @@ Unknown keys are an error, so a typo like `mask_feilds` fails at startup instead
 
 `mask_fields` hides the whole value of a field, found by its name. It is exact and predictable, so use it wherever the data has a field of its own, like `email` or `phone`. What it can't see is personal data typed into free text, such as "call me at 555-0101" inside `notes`.
 
-For those fields, add `mask_patterns`. Only the fields you list are scanned (at any depth, in any letter case), and only the email addresses and phone numbers inside the text are replaced, in place, so the rest stays readable:
+For those fields, add `mask_patterns`. Only the fields you list are scanned (by the field's own name, such as `notes`, not a path like `customer.notes`; at any depth, in any letter case), and only the email addresses and phone numbers inside the text are replaced, in place, so the rest stays readable:
 
 ```
 before:  Call Ada at 555-0101 or ada@example.org tomorrow.

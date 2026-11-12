@@ -499,6 +499,12 @@ def test_mask_patterns_in_the_policy_file():
     assert policy.mask_pattern_kinds == {"email"}
 
 
+def test_stray_spaces_around_a_field_name_are_ignored():
+    # A name with a space in it would otherwise match nothing, and quietly hide nothing.
+    policy = Policy.from_yaml('mask_patterns:\n  fields: [" Notes ", "description "]\n')
+    assert policy.mask_pattern_fields == {"notes", "description"}
+
+
 def test_the_example_in_the_default_policy_is_valid_when_uncommented():
     from importlib import resources
 
@@ -526,6 +532,11 @@ def test_every_kind_is_used_unless_the_policy_narrows_them():
         "mask_patterns:\n  kinds: [email]\n",  # no fields
         "mask_patterns: [notes]\n",  # the wrong shape
         "mask_pattern:\n  fields: [notes]\n",  # a typo in the section name
+        'mask_patterns:\n  fields: [""]\n',  # a blank name matches nothing
+        'mask_patterns:\n  fields: ["   "]\n',
+        'mask_patterns:\n  fields: [notes, ""]\n',  # one good name doesn't excuse a blank one
+        "mask_patterns:\n  fields: [notes, ~]\n",  # an empty YAML entry
+        "mask_patterns:\n  fields: [12]\n",  # not a name
     ],
 )
 def test_a_mistake_in_mask_patterns_fails_at_startup(text):

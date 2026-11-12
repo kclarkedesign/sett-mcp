@@ -56,7 +56,7 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +87,15 @@ class _MaskPatterns(BaseModel):
     model_config = ConfigDict(extra="forbid")
     fields: list[str] = Field(min_length=1)
     kinds: list[PatternKind] = Field(default_factory=lambda: list(PATTERN_KINDS), min_length=1)
+
+    @field_validator("fields")
+    @classmethod
+    def _names_are_not_blank(cls, names: list[str]) -> list[str]:
+        # A blank name matches no field, and a name with stray spaces matches none either.
+        names = [name.strip() for name in names]
+        if not all(names):
+            raise ValueError("field names can't be blank")
+        return names
 
 
 class _PolicyFile(BaseModel):
