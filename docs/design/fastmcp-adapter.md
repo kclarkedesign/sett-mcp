@@ -1,13 +1,13 @@
 # Sett for FastMCP: adapter plan
 
-**Status:** plan; the spike is done (2026-11-11, **go**) and nothing else is built. Researched 2026-11-08 against Sett `main` at v0.3.2 (GitHub) and FastMCP 4.1.6; the spike ran on FastMCP 4.1.8.
+**Status:** plan; the spike is done (2026-11-11, **go**) and the `policy.py` extraction is merged (#34, 2026-11-11). The `sett-fastmcp` package is not built yet. Researched 2026-11-08 against Sett `main` at v0.3.2 (GitHub) and FastMCP 4.1.6; the spike ran on FastMCP 4.1.8.
 **TL;DR:** ship a separate `sett-fastmcp` package, kept in the sett-mcp repo, whose core is one `SettMiddleware` added with `mcp.add_middleware(...)`. It reads the same YAML policy through code shared with the template. FastMCP 4 runs on the same official SDK v2 as Sett (`mcp>=2.3,<3`), so the policy core can be shared directly. The hard part is confirmations. They have to work on both protocol versions: the 2026-07-28 guard pattern (multi-round-trip requests) and the older `ctx.elicit()`, because FastMCP has no equivalent of the SDK's `Resolve`. A spike confirmed that middleware can run the new-protocol confirmation itself (see "Spike results").
 
 ---
 
 ## Review and decisions (2026-11-08)
 
-The plan was reviewed against Sett's code and this week's real-client testing. The recommendation stands: **Option A, a `SettMiddleware` in a separate `sett-fastmcp` package in this repo, with a shared `policy.py` and a drift check.** Additions and answers:
+The plan was reviewed against Sett's code and the real-client testing done in early November 2026. The recommendation stands: **Option A, a `SettMiddleware` in a separate `sett-fastmcp` package in this repo, with a shared `policy.py` and a drift check.** Additions and answers:
 
 - **Release tags must not collide.** `sett-mcp` now takes its version from `v*` tags only (`tag_regex` and `git describe --match v[0-9]*` in `pyproject.toml`). `sett-fastmcp` uses `sett-fastmcp-v*` tags with the opposite rule. Copier ignores tags that aren't plain versions, so the template's "latest release" stays the latest `v*`.
 - **Real-client lessons to carry over:**
@@ -25,7 +25,7 @@ Answers to section 10:
 3. **HTTP without a shared key:** yes, `check(mcp)` warns when confirmations are on and the request-state key is per-process.
 4. **Writer role:** a callable only in v1. Move `StderrAuditSink` and `SupabaseAuditSink` into `policy.py`; they need only the standard library and `anyio`. Keep `jwt` in `remote.py`.
 5. **FastMCP 3.x:** no.
-6. **Where this lives:** here, `docs/design/fastmcp-adapter.md`, versioned with the code. The roadmap links to it.
+6. **Where this lives:** here, `docs/design/fastmcp-adapter.md`, versioned with the code.
 7. **Replay (decided 2026-11-11, revised the same day after Codex's review of #27):** make a confirmation **single-use per instance**: a random nonce in the request state, consumed on first presentation (`spikes/fastmcp-middleware/replay.py`). Also recommend `RequestStateSecurity(ttl=120)` in the README. Protection across replicas needs a shared store; that is an extension point, not built in v1. The first version of this decision was to document the replay and rely on a short `ttl`; Codex pointed out that a short `ttl` only narrows the window. Whether `check(mcp)` can read the server's TTL to verify `replay_window` is untested, so don't promise it.
 
 ---
@@ -74,7 +74,7 @@ FastMCP users can't adopt any of this today. Their tools come from `@mcp.tool`, 
 | Testing: `async with Client(mcp, mode="auto"\|"legacy", elicitation_handler=...)`. The client drives multi-round-trip rounds itself. With no handler, it does not advertise elicitation. | [testing][test], [elicitation][elic] |
 | Pitfall: `DeclinedElicitation` and `CancelledElicitation` are truthy (open issue #4929). Check `action == "accept"`. | [#4929][i4929] |
 | Spec: `readOnlyHint` defaults to false and `destructiveHint` to **true**. Clients "MUST consider tool annotations to be untrusted unless they come from trusted servers." | [spec tools][spectools], [schema.ts][schema] |
-| Prior art: Eunomia (`eunomia-mcp`) and `permit-fastmcp` both filter lists and block calls in middleware, but they are pinned to `fastmcp>=2.10` and inactive since late 2025. FastMCP's own `Approval` provider is "advisory … not an enforcement mechanism." Nobody ships enforced confirmations or masking for FastMCP 4. | [Eunomia][eunomia], [Permit][permit], [Approval][approval] |
+| Prior art: Eunomia (`eunomia-mcp`) and `permit-fastmcp` both filter lists and block calls in middleware. Both declare `fastmcp>=2.10` (a minimum, not a pin), and their last PyPI releases are `eunomia-mcp` 0.3.10 (2025-11-11) and `permit-fastmcp` 0.1.2 (2025-09-15). Whether they work on FastMCP 4 was not tested. FastMCP's own `Approval` provider is "advisory … not an enforcement mechanism." The research (2026-11-08) found no project that enforces confirmations or masking for FastMCP 4. | [Eunomia][eunomia], [Permit][permit], [Approval][approval] |
 
 ## 3. Options
 
@@ -252,12 +252,14 @@ Port `template/tests/test_guardrails.py.jinja` assertion for assertion. Use `fas
 ## 9. Sequence
 
 1. **Spike: done 2026-11-11, go** (`spikes/fastmcp-middleware/`). The fallback in §4 is not needed.
-2. **Extract `policy.py`** in the template (`confirm_text`, refusal text, `AuditLog`). No behavior change: the existing template CI must pass unchanged.
+2. **Extract `policy.py`** in the template (`confirm_text`, refusal text, `AuditLog`). No behavior change: the existing template CI must pass unchanged. **Done 2026-11-11 (#34).** The audit sinks still live in `remote.py`; moving them is decision 4 above, as its own small change.
 3. **Build `sett-fastmcp`**: middleware, `check()`, the tests in §7 and the drift check.
 4. **Docs and release**: package README, a README section in Sett ("Using FastMCP?"), the client-support column and the publish workflow.
 5. **Later, on demand**: a template `framework` option, and a policy-schema extension if open question 2 lands.
 
-## 10. Open questions (for Kirk)
+## 10. Open questions
+
+All seven are answered; the decisions are under "Review and decisions" at the top. The questions stay here as the record of what was asked and what was recommended.
 
 1. **Proxied tools:** distrust upstream annotations by default (recommended), or trust them and document it?
 2. **Tools you can't annotate** (OpenAPI, third-party mounts): add a policy key such as `tools.read: [...]` to classify them? It would change the shared schema for template users too, where it's a no-op. Recommendation: wait for a real request, and use `allow` lists meanwhile.
