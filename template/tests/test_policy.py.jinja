@@ -125,6 +125,20 @@ async def test_audit_log_writes_one_masked_line_with_the_callers_extras(tmp_path
 
 
 @pytest.mark.anyio
+async def test_audit_extras_can_not_replace_the_canonical_fields(tmp_path, caplog):
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(Policy(audit_path=path, mask_fields=frozenset({"email"})))
+    extra = {"arguments": {"email": "ada@example.org"}, "outcome": "forged", "tool": "other", "subject": "u1"}
+    with caplog.at_level(logging.WARNING):
+        await log.record("t", "write", {"email": "ada@example.org"}, "ok", 0.0, extra)
+    line = path.read_text(encoding="utf-8")
+    entry = json.loads(line)
+    assert (entry["arguments"], entry["outcome"], entry["tool"], entry["subject"]) == ({"email": MASK}, "ok", "t", "u1")
+    assert "ada@example.org" not in line
+    assert "'arguments' ignored" in caplog.text
+
+
+@pytest.mark.anyio
 async def test_audit_log_fails_open_and_still_reaches_the_sinks(tmp_path, caplog):
     (tmp_path / "blocker").write_text("a file where a folder should be")
     sink = Recorder()

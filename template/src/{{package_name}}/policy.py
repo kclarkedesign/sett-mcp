@@ -348,8 +348,12 @@ class AuditLog:
             "outcome": outcome,
             "duration_ms": round(seconds * 1000, 1),
             "arguments": self._policy.mask(arguments),
-            **(extra or {}),
         }
+        for key, value in (extra or {}).items():
+            if key in entry:  # an extra must never replace a canonical field, least of all the masked arguments
+                log.warning("Audit extra %r ignored: the entry already has that field", key)
+            else:
+                entry[key] = value
         path = self._policy.audit_path
         if path is not None:
             try:
