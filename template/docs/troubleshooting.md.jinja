@@ -45,7 +45,8 @@ uv run {{ project_slug }} users list
 | "...was not run: it needs the user's confirmation, and this connection can't carry a confirmation prompt" | The client can't show the prompt, so Sett refuses instead of guessing | Use a client that shows prompts (see [Sett's client support table](https://github.com/kclarkedesign/sett-mcp#client-support)). In Claude Desktop, local servers can't show them but remote ones can: deploy it (`docs/remote.md`) |
 | "...the confirmation was cancelled" | The prompt was dismissed, or the client couldn't show it | Try again and answer the prompt |
 | "...the user declined" | Someone chose Deny or Decline | Nothing to fix: the tool didn't run |
-| A write passing `[masked]` is refused | Masked values are placeholders, so writing one back would overwrite real data | Ask for the change with the real value |
+| "...an argument is, or contains, the placeholder '[masked]'" | `[masked]` stands in for a hidden value, so writing it back would overwrite the real one. In a free-text field you scan with `mask_patterns`, any text that contains `[masked]` counts, because the model read "call me at [masked]" and is sending that text back | Ask for the change with the real text, and have the model pass only the fields it means to change. To edit a note with hidden parts, write the whole note again without the placeholder |
+| The server stops at startup with "Invalid policy" naming `mask_patterns` | A key or kind in that section is misspelled (`feilds`, `kinds: [emial]`), or `fields` or `kinds` is empty. The policy refuses to start rather than quietly hide nothing | Use exactly `fields` and `kinds`; the kinds are `email` and `phone`, and neither list may be empty (leave `kinds` out to use both) |
 
 ## Deploying (`deploy vercel --auth supabase`)
 
