@@ -1,0 +1,52 @@
+﻿[PASS] 8a accept (auto): outcome=returned ok ({'id': 'c1', 'name': 'Ada'}); c1 deleted=True; handler calls=1; middleware rounds=2
+[INFO] 8a form on the wire: message='Permanently delete contact c1?'; schema={'properties': {}, 'type': 'object'}
+[INFO] 8a annotations visible to middleware: title=None read_only_hint=False destructive_hint=True idempotent_hint=None open_world_hint=None
+[INFO] 8b modern: what middleware sees per round: [{"protocol": "2026-07-28", "had_input_responses": false, "request_state": null, "session_type": "ServerSession", "client_elicitation_cap": "form=FormElicitationCapability() url=UrlElicitationCapability()"}, {"protocol": "2026-07-28", "had_input_responses": true, "request_state": "f97a6e28f4475a39", "session_type": "ServerSession", "client_elicitation_cap": "form=FormElicitationCapability() url=UrlElicitationCapability()"}]
+[PASS] 8a decline (auto): outcome=ToolError: delete_contact was not run: the user declined.; c1 kept=True
+[PASS] 8a cancel (auto): outcome=ToolError: delete_contact was not run: the confirmation was cancelled.; c1 kept=True
+[PASS] 8b modern, client has NO handler: outcome=MCPError: Elicitation not supported; c1 kept=True; middleware rounds=1
+[INFO] 8b modern, no handler: capabilities server saw: [{"protocol": "2026-07-28", "had_input_responses": false, "request_state": null, "session_type": "ServerSession", "client_elicitation_cap": null}]
+[PASS] 8b modern, no handler, capability checked UP FRONT: outcome=ToolError: delete_contact was not run: this connection can't carry a confirmation prompt.; c1 kept=True; middleware rounds=1
+[PASS] 8a legacy accept: outcome=returned ok ({'id': 'c1', 'name': 'Ada'}); c1 deleted=True; handler calls=1; protocol=2025-11-25
+[INFO] 8b legacy: capabilities server saw: [{"protocol": "2025-11-25", "had_input_responses": false, "request_state": null, "session_type": "ServerSession", "client_elicitation_cap": "form=FormElicitationCapability() url=UrlElicitationCapability()"}]
+[PASS] 8b legacy, no handler, capability check: outcome=ToolError: delete_contact was not run: this connection can't carry a confirmation prompt.; c1 kept=True
+[INFO] 8b legacy, no handler, NO capability check (what ctx.elicit raises): outcome=MCPError: Elicitation not supported; c1 kept=True
+[FAIL] 8c empty form via dataclass: schema={'properties': {}, 'title': 'Empty', 'type': 'object'}; top-level keys ok=False; c1 deleted=True; outcome=returned ok ({'id': 'c1', 'name': 'Ada'})
+[FAIL] 8c empty form via pydantic: schema={'properties': {}, 'title': 'EmptyModel', 'type': 'object'}; top-level keys ok=False; c1 deleted=True; outcome=returned ok ({'id': 'c1', 'name': 'Ada'})
+[PASS] 8c empty form via session_form: schema={'type': 'object', 'properties': {}}; top-level keys ok=True; c1 deleted=True; outcome=returned ok ({'id': 'c1', 'name': 'Ada'})
+[INFO] 8d SDK sealing source mentions: from mcp.server.auth.provider import principal_components | "authenticated_principal", | binding, principal); a codec only provides integrity and, ideally, | def authenticated_principal(ctx: ServerRequestContext[Any, Any]) -> str | None: | """Default principal binding: the authenticated (client, issuer, subject) identity. | client are distinct principals whenever the token verifier supplies a | Returns `None` (state not principal-bound) on unauthenticated transports. | return compact_json(principal_components(token)) | """Policy for protecting `requestState`: codec, TTL, principal, audience. | `keys=[old, new]`, then `keys=[new, old]`, then `keys=[new]` after one TTL. | The boundary enforces expiry, request binding, audience, and principal for | every codec, fail-closed in both directions. `audience=None` defers to the | boundary's `default_audience` (`MCPServer` passes its server name). | ttl: float
+[INFO] 8d raw rounds: client.session type: mcp.client.session.ClientSession
+[PASS] 8d forged accept, no request_state: returned CallToolResult: meta={'io.modelcontextprotocol/serverInfo': {'name': 'Spike', 'version': '4.1.8'}} content=[TextContent(type='text', text="delete_contact was not run: the confi; c1 kept=True
+[PASS] 8d forged accept, made-up request_state: MCPError: Invalid or expired requestState; c1 kept=True
+[INFO] 8d genuine replay: round 1 type: InputRequiredResult; sealed request_state present=True; prefix='v1.HQI'; plaintext leaked=False
+[INFO] 8d genuine state replayed with same args (c1): returned CallToolResult: meta={'io.modelcontextprotocol/serverInfo': {'name': 'Spike', 'version': '4.1.8'}} content=[TextContent(type='text', text='{"id":"c1","name":"Ada"}', ; deleted=['c1']
+[INFO] 8d genuine state replayed with DIFFERENT args (c2): MCPError: Invalid or expired requestState; deleted=['c1']
+[PASS] 8d replay summary: c2 kept=True (must be True: state was issued for c1)
+[INFO] 8d same genuine state, SECOND use: returned CallToolResult: is_error=True meta={'io.modelcontextprotocol/serverInfo': {'name': 'Spike', 'version': '4.1.8'}} content=[TextContent(type='text', text="Error calling tool 'delete_contact': 'c1'", ann
+
+==== SUMMARY ====
+PASS   8a accept (auto)
+INFO   8a form on the wire
+INFO   8a annotations visible to middleware
+INFO   8b modern: what middleware sees per round
+PASS   8a decline (auto)
+PASS   8a cancel (auto)
+PASS   8b modern, client has NO handler
+INFO   8b modern, no handler: capabilities server saw
+PASS   8b modern, no handler, capability checked UP FRONT
+PASS   8a legacy accept
+INFO   8b legacy: capabilities server saw
+PASS   8b legacy, no handler, capability check
+INFO   8b legacy, no handler, NO capability check (what ctx.elicit raises)
+FAIL   8c empty form via dataclass
+FAIL   8c empty form via pydantic
+PASS   8c empty form via session_form
+INFO   8d SDK sealing source mentions
+INFO   8d raw rounds: client.session type
+PASS   8d forged accept, no request_state
+PASS   8d forged accept, made-up request_state
+INFO   8d genuine replay: round 1 type
+INFO   8d genuine state replayed with same args (c1)
+INFO   8d genuine state replayed with DIFFERENT args (c2)
+PASS   8d replay summary
+INFO   8d same genuine state, SECOND use
