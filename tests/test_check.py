@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import http.client
 import json
+import os
+import random
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -116,11 +119,14 @@ def serve(**options):
             if options.get("handshake_rejects_token") and self.headers.get("Authorization") and self.headers.get("Mcp-Protocol-Version") != "2026-07-28":
                 return self.json({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32600, "message": "No tokens here"}}, 400)
             if options.get("auth") and not public and self.headers.get("Authorization") != "Bearer good":
+                if options.get("deny_status") == 403:  # wrong: 403 is for a valid token without enough permission
+                    return self.reply(403, b'{"error": "forbidden"}', [("Content-Type", "application/json")])
+                link = f"http://127.0.0.1:{self.server.server_port}/.well-known/oauth-protected-resource/mcp"
                 challenge = 'Bearer error="invalid_token"'
                 if not options.get("no_challenge_link"):
-                    base = f"http://127.0.0.1:{self.server.server_port}"
-                    link = f"{base}/.well-known/oauth-protected-resource/mcp"
                     challenge += f", resource_metadata={link}" if options.get("unquoted") else f', resource_metadata="{link}"'
+                if options.get("challenge"):  # a challenge written out in full; {link} is the metadata address
+                    challenge = options["challenge"].format(link=link)
                 return self.reply(401, b'{"error": "invalid_token"}', [("Content-Type", "application/json"), ("WWW-Authenticate", challenge)])
             if self.headers.get("Origin"):
                 state["origins"].append(self.headers["Origin"])
@@ -129,6 +135,8 @@ def serve(**options):
             method = body.get("method")
             era = options.get("era", "both")
             modern = self.headers.get("Mcp-Protocol-Version") == "2026-07-28" and self.headers.get("Mcp-Method") == method
+            if modern and method == "server/discover" and options.get("discover_error"):  # e.g. HeaderMismatch
+                return self.json({"jsonrpc": "2.0", "id": body.get("id"), "error": options["discover_error"]}, 400)
             if (modern and era == "legacy" and not options.get("discover_error_200")) or (method == "initialize" and era == "modern"):
                 return self.json({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32600, "message": "Bad Request"}}, 400)
             if method == "server/discover" and modern:
@@ -144,6 +152,8 @@ def serve(**options):
                 return self.json({"jsonrpc": "2.0", "id": body["id"], "result": result}, headers=[("Mcp-Session-Id", session)])
             if method == "notifications/initialized":
                 state["initialized"].add(self.headers.get("Mcp-Session-Id"))
+                if "initialized_status" in options:
+                    return self.reply(options["initialized_status"])
             if method == "tools/list" and not modern:
                 if options.get("handshake_tools_malformed"):
                     bad = [*TOOLS, {"name": "acme_odd", "description": "Malformed only over the handshake.", "inputSchema": {"type": "object", "required": "q"}}]
@@ -179,7 +189,8 @@ def serve(**options):
             return self.reply(202)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    # A short poll interval: shutdown() waits for one, which made every test's teardown take half a second.
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_port}/mcp", state
 
 
@@ -786,7 +797,7 @@ def test_ctrl_c_exits_quietly(monkeypatch, capsys):
 # --- Against the real MCP Python SDK --------------------------------------------------
 
 
-def _sdk_server(auth_issuer=None):
+def _sdk_server(auth_issuer=None, header_tool=False):
     """A real MCPServer on a free port, optionally behind the SDK's own bearer-token check."""
     mcp_server = pytest.importorskip("mcp.server.mcpserver")
     uvicorn = pytest.importorskip("uvicorn")
@@ -811,6 +822,14 @@ def _sdk_server(auth_issuer=None):
     def echo(text: str) -> str:
         """Echo the text back to the caller, for testing."""
         return text
+
+    if header_tool:  # a parameter the 2026-07-28 transport copies into an Mcp-Param-Region header
+        from pydantic import Field
+
+        @app.tool()
+        def regional(region: str = Field(..., json_schema_extra={"x-mcp-header": "Region"})) -> str:
+            """Return the region it was given, which clients also send as a header."""
+            return region
 
     config = uvicorn.Config(app.streamable_http_app(), host="127.0.0.1", port=port, log_level="error")
     srv = uvicorn.Server(config)
@@ -1053,3 +1072,424 @@ def test_a_stream_line_longer_than_one_read_is_joined(server, short_deadline):
     long_tool = {**TOOLS[0], "description": "Searches contacts. " + "x" * 100_000}
     url, _ = server(sse_open=True, tools=[long_tool])
     assert statuses(check(url))["Lists tools"] == "PASS"
+
+
+# --- Codex's follow-ups from #17 (issue #25) -------------------------------------------
+
+DISCOVER_PUBLIC = {"server/discover", "initialize", "notifications/initialized", "ping"}
+
+
+def failures(results):
+    return [(r.name, r.detail) for r in results if r.status == "FAIL"]
+
+
+# 1. A recognized 2026-07-28 error is an answer from a 2026-07-28 server, not a reason to fall back.
+
+
+@pytest.mark.parametrize(
+    ("code", "name"),
+    [(-32020, "HeaderMismatch"), (-32021, "MissingRequiredClientCapability"), (-32022, "UnsupportedProtocolVersion")],
+)
+@pytest.mark.parametrize("token", [None, "good"])
+def test_a_recognized_2026_error_on_discover_fails_and_the_handshake_cannot_rescue_it(server, code, name, token):
+    url, _ = server(auth=bool(token), discover_error={"code": code, "message": "rejected it"})
+    results = check(url, token=token)
+    refusal = next(r for r in results if r.name == "Protocol 2026-07-28")
+    assert refusal.status == "FAIL"
+    assert name in refusal.detail and str(code) in refusal.detail and "rejected it" in refusal.detail
+    assert "don't fall back" in refusal.fix
+    assert statuses(results)["Handshake protocol"] == "PASS"  # still reported, but it can't make the run pass
+    assert report(results, lambda line: None) == 1
+
+
+@pytest.mark.parametrize("code", [-32600, -32601, -32603, 5])
+def test_any_other_error_on_discover_still_falls_back_to_the_handshake(server, code):
+    url, _ = server(discover_error={"code": code, "message": "no such method"})
+    results = check(url)
+    assert statuses(results)["Protocol 2026-07-28"] == "INFO" and statuses(results)["Handshake protocol"] == "PASS"
+    assert not failures(results)
+
+
+@pytest.mark.parametrize("code", [[], {"a": 1}, "-32020", True, None, 1.5])
+def test_an_error_code_that_is_not_an_integer_is_not_recognized(server, code):
+    url, _ = server(discover_error={"code": code, "message": "odd"})
+    assert statuses(check(url))["Protocol 2026-07-28"] == "INFO"
+
+
+def test_the_recognized_error_is_reported_when_the_handshake_fails_too(server):
+    url, _ = server(era="modern", discover_error={"code": -32020, "message": "rejected it"})
+    results = check(url)
+    assert statuses(results)["Protocol 2026-07-28"] == "FAIL"
+    assert "Answers MCP requests" not in statuses(results)
+
+
+@pytest.mark.parametrize("token", [None, "good"])
+def test_the_recognized_error_is_reported_once_even_when_sign_in_ends_the_check(server, token):
+    # Codex, round 1: discover is public and refused, the handshake asks for a token. With no token the
+    # check ends after the sign-in lines, and used to exit 0 for a server 2026-07-28 clients can't use.
+    url, _ = server(auth=True, public={"server/discover"}, discover_error={"code": -32021, "message": "needs sampling"})
+    results = check(url, token=token)
+    refusals = [r for r in results if r.name == "Protocol 2026-07-28"]
+    assert [r.status for r in refusals] == ["FAIL"] and "MissingRequiredClientCapability" in refusals[0].detail
+    assert report(results, lambda line: None) == 1
+    if not token:
+        assert statuses(results)["Requires sign-in"] == "PASS"
+
+
+# 2. A failed notifications/initialized fails the handshake.
+
+
+@pytest.mark.parametrize("status", [401, 404, 500])
+def test_a_failed_initialized_notification_fails_the_handshake(server, status):
+    url, _ = server(initialized_status=status)
+    results = check(url)
+    handshake = next(r for r in results if r.name == "Handshake protocol")
+    assert handshake.status == "FAIL" and "notifications/initialized" in handshake.detail and str(status) in handshake.detail
+    assert report(results, lambda line: None) == 1
+
+
+@pytest.mark.parametrize("status", [200, 202, 204])
+def test_a_successful_initialized_notification_passes(server, status):
+    url, _ = server(initialized_status=status)
+    assert statuses(check(url))["Handshake protocol"] == "PASS"
+
+
+def test_a_failed_initialized_notification_fails_the_signed_in_handshake_too(server):
+    url, _ = server(auth=True, initialized_status=500)
+    results = check(url, token="good")
+    assert statuses(results)["Handshake protocol"] == "FAIL"
+    assert statuses(results)["Protocol 2026-07-28"] == "PASS"
+
+
+def test_an_anonymous_handshake_session_that_cannot_finish_setup_is_not_open(server):
+    handshake = {("handshake", "initialize"), ("handshake", "tools/list")}
+    url, _ = server(auth=True, open_pairs=handshake, initialized_status=500)
+    named = statuses(check(url, token="good"))
+    assert "Token not needed" not in named and "No sign-in required" not in named
+    assert named["Token accepted"] == "PASS"
+
+
+def test_an_anonymous_handshake_session_that_finishes_setup_is_open(server):
+    handshake = {("handshake", "initialize"), ("handshake", "tools/list")}
+    url, _ = server(auth=True, open_pairs=handshake)
+    assert statuses(check(url, token="good"))["Token not needed"] == "INFO"
+
+
+# 3. x-mcp-header on 2026-07-28 tool properties.
+
+HEADER_SCHEMAS = [
+    ("a valid header", {"region": {"type": "string", "x-mcp-header": "Region"}}, True),
+    ("integer and boolean are allowed", {"n": {"type": "integer", "x-mcp-header": "N"}, "b": {"type": "boolean", "x-mcp-header": "B"}}, True),
+    ("a nested object's property", {"o": {"type": "object", "properties": {"r": {"type": "string", "x-mcp-header": "R"}}}}, True),
+    ("a name that isn't a token", {"region": {"type": "string", "x-mcp-header": "Re gion"}}, False),
+    ("a name with a colon", {"region": {"type": "string", "x-mcp-header": "X:Y"}}, False),
+    ("an empty name", {"region": {"type": "string", "x-mcp-header": ""}}, False),
+    ("a name that isn't text", {"region": {"type": "string", "x-mcp-header": 5}}, False),
+    ("a number property", {"price": {"type": "number", "x-mcp-header": "Price"}}, False),
+    ("an object property", {"o": {"type": "object", "x-mcp-header": "O"}}, False),
+    ("a list of types", {"region": {"type": ["string", "null"], "x-mcp-header": "Region"}}, False),
+    ("no type", {"region": {"x-mcp-header": "Region"}}, False),
+    ("a duplicate, ignoring case", {"a": {"type": "string", "x-mcp-header": "Region"}, "b": {"type": "string", "x-mcp-header": "region"}}, False),
+    ("under anyOf", {"region": {"anyOf": [{"type": "string", "x-mcp-header": "Region"}]}}, False),
+    ("under items", {"list": {"type": "array", "items": {"type": "string", "x-mcp-header": "Region"}}}, False),
+    ("under additionalProperties", {"m": {"type": "object", "additionalProperties": {"type": "string", "x-mcp-header": "R"}}}, False),
+]
+
+
+def _tool_with(properties, **schema):
+    return {**TOOLS[0], "name": "acme_regional", "inputSchema": {"type": "object", "properties": properties, **schema}}
+
+
+@pytest.mark.parametrize(("label", "properties", "valid"), HEADER_SCHEMAS, ids=[c[0] for c in HEADER_SCHEMAS])
+def test_x_mcp_header_rules_match_the_sdk(label, properties, valid):
+    inbound = pytest.importorskip("mcp.shared.inbound")
+    schema = {"type": "object", "properties": properties}
+    assert (check_module._x_mcp_header_problem(schema) == "") is valid
+    assert (inbound.find_invalid_x_mcp_header(schema) is None) is valid
+
+
+def test_x_mcp_header_on_the_schema_root_is_invalid():
+    inbound = pytest.importorskip("mcp.shared.inbound")
+    schema = {"type": "object", "x-mcp-header": "Root", "properties": {}}
+    assert check_module._x_mcp_header_problem(schema) and inbound.find_invalid_x_mcp_header(schema)
+
+
+def test_x_mcp_header_rules_agree_with_the_sdk_on_random_schemas():
+    inbound = pytest.importorskip("mcp.shared.inbound")
+    rng = random.Random(25)
+    names = ["Region", "region", "X-Id", "bad name", "", 5, None]
+    kinds = ["string", "integer", "boolean", "number", "object", "array", ["string"], None, 7]
+
+    def schema(depth=0):
+        node = {}
+        if rng.random() < 0.8:
+            node["type"] = rng.choice(kinds)
+        if rng.random() < 0.5:
+            node["x-mcp-header"] = rng.choice(names)
+        if depth < 3:
+            if rng.random() < 0.4:
+                node["properties"] = {f"p{i}": schema(depth + 1) for i in range(rng.randint(0, 3))}
+            for keyword in rng.sample(["items", "anyOf", "additionalProperties", "not", "$defs"], rng.randint(0, 2)):
+                inner = schema(depth + 1)
+                node[keyword] = [inner] if keyword == "anyOf" else {"k": inner} if keyword == "$defs" else inner
+        return node
+
+    for i in range(400):
+        candidate = schema()
+        ours = check_module._x_mcp_header_problem(candidate) == ""
+        assert ours == (inbound.find_invalid_x_mcp_header(candidate) is None), (i, candidate)
+
+
+def test_a_tool_with_an_invalid_x_mcp_header_fails_over_2026(server):
+    bad = _tool_with({"price": {"type": "number", "x-mcp-header": "Price"}})
+    url, _ = server(era="modern", tools=[TOOLS[0], bad])
+    result = next(r for r in check(url) if r.name == "Tool definitions")
+    assert result.status == "FAIL" and "acme_regional" in result.detail and "price" in result.detail
+
+
+def test_a_tool_with_a_valid_x_mcp_header_passes_over_2026(server):
+    good = _tool_with({"region": {"type": "string", "description": "Where", "x-mcp-header": "Region"}})
+    url, _ = server(era="modern", tools=[TOOLS[0], good])
+    assert "Tool definitions" not in statuses(check(url))
+
+
+def test_x_mcp_header_is_only_judged_over_2026(server):
+    bad = _tool_with({"price": {"type": "number", "x-mcp-header": "Price"}})
+    url, _ = server(era="legacy", tools=[TOOLS[0], bad])
+    assert "Tool definitions" not in statuses(check(url))
+
+
+def test_a_real_sdk_server_with_an_x_mcp_header_tool_passes():
+    srv, url = _sdk_server(header_tool=True)
+    try:
+        results = check(url)
+    finally:
+        srv.should_exit = True
+    assert not failures(results), failures(results)
+    assert statuses(results)["Lists tools"] == "PASS"
+
+
+# 4. A 403 without a token isn't sign-in.
+
+SIGN_IN_FIX = "401 and a WWW-Authenticate challenge"
+
+
+def test_a_403_for_tools_without_a_token_is_not_sign_in(server):
+    url, _ = server(auth=True, deny_status=403, public=DISCOVER_PUBLIC)
+    results = check(url)
+    sign_in = next(r for r in results if r.name == "Requires sign-in")
+    assert sign_in.status == "FAIL" and "403" in sign_in.detail and SIGN_IN_FIX in sign_in.fix
+    assert report(results, lambda line: None) == 1
+
+
+def test_a_403_for_every_request_without_a_token_is_not_sign_in(server):
+    url, _ = server(auth=True, deny_status=403)
+    results = check(url)
+    sign_in = next(r for r in results if r.name == "Requires sign-in")
+    assert sign_in.status == "FAIL" and SIGN_IN_FIX in sign_in.fix
+    assert "Answers MCP requests" not in statuses(results)
+
+
+def test_a_401_for_tools_without_a_token_is_still_sign_in(server):
+    url, _ = server(auth=True, public=DISCOVER_PUBLIC)
+    assert statuses(check(url))["Requires sign-in"] == "PASS"
+
+
+def test_a_403_with_a_token_is_still_a_rejected_token(server):
+    url, _ = server(auth=True, deny_status=403)
+    assert statuses(check(url, token="bad"))["Token accepted"] == "FAIL"
+
+
+# 5. resource_metadata counts only on a Bearer challenge.
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ('Bearer error="x", resource_metadata="u"', [("bearer", {"error": "x", "resource_metadata": "u"})]),
+        ('Basic realm="x", Foo resource_metadata="u"', [("basic", {"realm": "x"}), ("foo", {"resource_metadata": "u"})]),
+        ("Bearer", [("bearer", {})]),
+        ("Negotiate abc123==", [("negotiate", {})]),
+        ('bEARER Resource_Metadata = "u"', [("bearer", {"resource_metadata": "u"})]),
+        ('Bearer realm="a\\"b, c", resource_metadata=u', [("bearer", {"realm": 'a"b, c', "resource_metadata": "u"})]),
+        ("Bearer resource_metadata=http://h:1/p?q=1", [("bearer", {"resource_metadata": "http://h:1/p?q=1"})]),
+        ('Bearer a="1", a="2"', [("bearer", {"a": "1"})]),
+        ("", []),
+        (",,, ,", []),
+        ('realm="x"', []),
+        ('Bearer a="unterminated, b=c', [("bearer", {"a": "unterminated, b=c"})]),
+    ],
+)
+def test_www_authenticate_is_read_as_challenges(header, expected):
+    assert check_module._challenges(header) == expected
+
+
+@pytest.mark.parametrize(
+    ("challenge", "status"),
+    [
+        ('Basic realm="x", Foo resource_metadata="{link}"', "WARN"),
+        ('Foo resource_metadata="{link}", Bearer error="invalid_token"', "WARN"),
+        ('Basic resource_metadata="{link}"', "WARN"),
+        ('Bearer error_description="resource_metadata={link}"', "WARN"),
+        ('bearer RESOURCE_METADATA="{link}"', "PASS"),
+        ('BEARER resource_metadata="{link}"', "PASS"),
+        ('Basic realm="x", Bearer resource_metadata="{link}"', "PASS"),
+        ('Bearer error_description="a, resource_metadata=nope", resource_metadata="{link}"', "PASS"),
+    ],
+)
+def test_the_metadata_link_counts_only_on_a_bearer_challenge(server, challenge, status):
+    url, _ = server(auth=True, challenge=challenge)
+    results = statuses(check(url))
+    assert results["401 points to sign-in"] == status
+    assert results["Protected resource metadata"] == "PASS"  # the well-known address still finds it
+
+
+def test_a_non_bearer_challenge_is_explained(server):
+    url, _ = server(auth=True, challenge='Basic realm="x", Foo resource_metadata="{link}"')
+    warning = next(r for r in check(url) if r.name == "401 points to sign-in")
+    assert "Bearer" in warning.detail and "Bearer" in warning.fix
+
+
+# Fuzzing: real servers on localhost whose replies are sometimes spoiled on the wire.
+
+FUZZ_RUNS = int(os.environ.get("FUZZ_RUNS", "100"))
+_JUNK = [None, True, False, 0, -1, 2**70, 1.5, "", "x" * 50, [], {}, [1, "a"], {"a": None}, "\u0000é"]
+_CHALLENGES = [
+    'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"',
+    'Bearer resource_metadata={base}/.well-known/oauth-protected-resource/mcp, error="invalid_token"',
+    'Basic realm="x"',
+    "Bearer",
+    "",
+    '"',
+    "Bearer ,,, =",
+    "Bearer resource_metadata=",
+    'Bearer a="b',
+    "=" * 500,
+    'Foo resource_metadata="{base}/x", Bearer',
+    'Bearer resource_metadata="javascript:alert(1)"',
+    'Bearer resource_metadata="//x"',
+]
+_PROFILES = [
+    {},
+    {"auth": True},
+    {"auth": True, "public": {"server/discover", "ping"}},
+    {"auth": True, "deny_status": 403},
+    {"auth": True, "unquoted": True},
+    {"auth": True, "challenge": 'Basic realm="x", Bearer resource_metadata="{link}"'},
+    {"era": "legacy"},
+    {"era": "modern"},
+    {"sse": True},
+    {"pages": [TOOLS, TOOLS]},
+    {"initialized_status": 500},
+    {"discover_error": {"code": -32020, "message": "mismatch"}},
+    {"tools": [{"name": "t", "description": "A tool that does one thing.", "inputSchema": {"type": "object", "properties": {"q": {"type": "number", "x-mcp-header": "Q"}}}}]},
+]
+DEEP = {"Lists tools", "Tool definitions", "Handshake protocol", "Authorization server metadata", "Requires sign-in"}  # what a fuzz run must reach
+
+
+def _mutate(rng, value, depth=0):
+    if depth > 6 or rng.random() < 0.12:
+        return rng.choice(_JUNK)
+    if isinstance(value, dict):
+        kept = {k: _mutate(rng, v, depth + 1) for k, v in value.items() if rng.random() > 0.1}
+        if rng.random() < 0.1:
+            kept[rng.choice(["x-mcp-header", "type", "properties", "code"])] = rng.choice(_JUNK)
+        return kept
+    if isinstance(value, list):
+        return [_mutate(rng, v, depth + 1) for v in value]
+    return value
+
+
+def _spoiling_proxy(upstream_port, rng, rate):
+    """A server that passes each request to a good one and, now and then, spoils the reply on the wire."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def handle_any(self):
+            port = self.server.server_port
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            try:
+                upstream = http.client.HTTPConnection("127.0.0.1", upstream_port, timeout=10)
+                sent = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
+                upstream.request(self.command, self.path, raw or None, sent)
+                reply = upstream.getresponse()
+                status, body = reply.status, reply.read()
+                headers = [(k, v) for k, v in reply.getheaders() if k.lower() not in ("content-length", "transfer-encoding", "connection")]
+                upstream.close()
+            except OSError:
+                return
+
+            def mine(data):  # links in the reply name the good server; they should name this one
+                return data.replace(f"127.0.0.1:{upstream_port}".encode(), f"127.0.0.1:{port}".encode())
+
+            body, headers, lie = mine(body), [(k, mine(v.encode()).decode()) for k, v in headers], 0
+            here = f"http://127.0.0.1:{port}"
+            if rng.random() < rate:
+                for spoil in rng.sample(["hangup", "status", "type", "challenge", "session", "location", "json", "cut", "garbage", "sse", "big", "lie"], rng.randint(1, 3)):
+                    if spoil == "hangup":
+                        return
+                    if spoil == "status":
+                        status = rng.choice([200, 201, 202, 204, 301, 302, 307, 400, 401, 403, 404, 405, 500, 503, 99, 600])
+                    elif spoil == "type":
+                        kind = rng.choice(["application/json", "text/event-stream", "text/plain", "application/json; charset=utf-8", "", "\x01", "application/jsonx"])
+                        headers = [("Content-Type", kind), *[(k, v) for k, v in headers if k.lower() != "content-type"]]
+                    elif spoil == "challenge":
+                        headers.append(("WWW-Authenticate", rng.choice(_CHALLENGES).format(base=here, link=here)))
+                    elif spoil == "session":
+                        headers.append(("Mcp-Session-Id", rng.choice(["abc", "", "a b", "\x7f", "é", "x" * 5000])))
+                    elif spoil == "location":
+                        headers.append(("Location", rng.choice([f"{here}/mcp", "https://other.example/", "", "//x", "http://[bad"])))
+                    elif spoil == "json":
+                        try:
+                            body = json.dumps(_mutate(rng, json.loads(body))).encode()
+                        except ValueError:
+                            pass
+                    elif spoil == "cut":
+                        body = body[: rng.randint(0, len(body))]
+                    elif spoil == "garbage":
+                        body = bytes(rng.randrange(256) for _ in range(rng.randint(0, 200)))
+                    elif spoil == "sse":
+                        body = b"data: " + body + rng.choice([b"\n\n", b"\n", b"", b"\r\n\r\n"])
+                        headers = [("Content-Type", "text/event-stream"), *[(k, v) for k, v in headers if k.lower() != "content-type"]]
+                    elif spoil == "big":
+                        body = b"x" * 100_000
+                    elif spoil == "lie":
+                        lie = rng.choice([10, -len(body)])
+            head = f"HTTP/1.0 {status} X\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers) + f"Content-Length: {max(len(body) + lie, 0)}\r\n\r\n"
+            try:
+                self.wfile.write(head.encode("latin-1", "replace") + body)
+            except OSError:
+                pass
+
+        do_GET = do_POST = handle_any
+
+    return ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+
+
+def test_random_malformed_replies_never_crash_the_check(short_deadline):
+    """FUZZ_RUNS=5000 runs it much longer; a failure names its seed, which replays it."""
+    reached = set()
+    for seed in range(FUZZ_RUNS):
+        rng = random.Random(seed)
+        options = rng.choice(_PROFILES)
+        good, _, _ = serve(**options)
+        proxy = _spoiling_proxy(good.server_port, rng, rate=rng.choice([0, 0.05, 0.15, 0.4]))
+        threading.Thread(target=proxy.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+        token = rng.choice([None, "good", "t0k3n-secret"])
+        try:
+            results = check(f"http://127.0.0.1:{proxy.server_port}/mcp", token=token)
+            lines = []
+            report(results, lines.append)
+        except Exception as exc:
+            raise AssertionError(f"check() raised for seed {seed} ({options}, token {token})") from exc
+        finally:
+            for srv in (proxy, good):
+                srv.shutdown()
+                srv.server_close()
+        assert results and all(r.status in ("PASS", "WARN", "FAIL", "INFO") for r in results), seed
+        assert not any("t0k3n-secret" in line for line in lines), seed
+        reached |= {r.name for r in results}
+    if FUZZ_RUNS >= 100:  # a fuzzer that stops at the first reply proves nothing
+        assert DEEP <= reached, DEEP - reached

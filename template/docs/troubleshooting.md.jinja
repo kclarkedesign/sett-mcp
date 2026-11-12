@@ -68,6 +68,22 @@ uv run {{ project_slug }} users list
 | A user can read but not write | They don't have the writer role, or their sign-in predates it | `uv run {{ project_slug }} users grant <email>`; it applies within an hour, or at once if they sign in again |
 | Everything stopped working after a week | Free Supabase projects pause when idle | Restore the project in the Supabase dashboard |
 
+## Testing a deployed server
+
+```bash
+uvx sett-mcp check https://<your-project>.vercel.app/mcp
+```
+
+It prints one line per check, starting with PASS, WARN, FAIL or INFO, and a fix under anything that needs one. A FAIL means current clients would hit that problem too, and the command ends with an error code, so it also works in a script. Add `--token -` to check the tools as a signed-in user (`docs/remote.md` says what it needs). Nothing on the server changes.
+
+| You see | Why | Fix |
+|---|---|---|
+| `FAIL Requires sign-in` with "got HTTP 403, not 401" | Something answers requests that have no token with 403. Clients only start signing in after a 401 with a `WWW-Authenticate` header, so with a 403 they never offer the sign-in | Answer requests without a token with 401 and a `WWW-Authenticate: Bearer resource_metadata="..."` header. 403 is for someone who is signed in but not allowed. A firewall or access gateway in front of the server is the usual cause: let `/mcp` through to the server, which sends the 401 itself |
+| `WARN 401 points to sign-in` with "no Bearer challenge" or "No resource_metadata in the Bearer challenge" | The 401 doesn't carry a `Bearer` challenge with a `resource_metadata` link. Only the Bearer challenge counts, as in clients: a `Basic` or other scheme with the same word on it doesn't | Send `WWW-Authenticate: Bearer resource_metadata="https://<your-project>.vercel.app/.well-known/oauth-protected-resource/mcp"`. Clients can still find the metadata at that well-known address, but the link saves them guessing. Sett's server sends it, so a proxy in front that rewrites headers may be dropping it |
+| `FAIL Protocol 2026-07-28` with "server/discover answered HeaderMismatch", "MissingRequiredClientCapability" or "UnsupportedProtocolVersion" | The server understood the current protocol and refused the request. Clients take that to mean it speaks 2026-07-28 and don't fall back to the older handshake, so they fail even when the handshake line says PASS | Update the MCP SDK (`uv lock --upgrade-package mcp`, then `uv sync`, then deploy again). With a proxy in front, make sure it passes the `Mcp-Method` and `Mcp-Protocol-Version` headers through unchanged |
+| `FAIL Handshake protocol` with "notifications/initialized answered HTTP 404" (or 401, 500) | After `initialize`, older clients send one more message to say setup is done, and stop if it fails. A 404 usually means the server runs as several copies and the second one didn't know the session | Run the server stateless (Sett's `serve --http` does), or fix whatever answers with that error. A 401 means that step lacks the sign-in |
+| `FAIL Tool definitions` mentioning `x-mcp-header` | A tool asks for a parameter to be copied into an HTTP header (`x-mcp-header`) but breaks a rule, and current clients leave the tool out | Use a plain header name (letters, digits and `-`) on a string, integer or boolean parameter that sits directly in the tool's `properties` (not inside `anyOf` or `items`), and don't use the same name twice (`Region` and `region` count as the same) |
+
 ## Where the configs live
 
 | Client | Config | Written by |

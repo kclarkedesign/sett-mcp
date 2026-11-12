@@ -22,7 +22,7 @@ import ssl
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -39,6 +39,12 @@ FINAL_URL = "x-sett-final-url"  # added to a reply's headers when a redirect was
 HEADER_SAFE = re.compile(r"[\x21-\x7e]+")  # visible ASCII: what may go in a header value
 TOOL_NAME = re.compile(r"[A-Za-z0-9._-]{1,128}")  # the spec's rule
 STRICT_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")  # what some clients, Claude among them, accept
+TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")  # RFC 9110 token: a header name, an auth scheme or parameter name
+# What a 2026-07-28 server answers (HTTP 400) when it understands a request and refuses it. A client that
+# gets one takes the server to be 2026-07-28 and doesn't fall back to the handshake (mcp_types.jsonrpc).
+MODERN_ERRORS = {-32020: "HeaderMismatch", -32021: "MissingRequiredClientCapability", -32022: "UnsupportedProtocolVersion"}
+X_MCP_HEADER = "x-mcp-header"
+SIGN_IN_FIX = "Answer requests without a token with 401 and a WWW-Authenticate challenge; 403 is for a valid token without enough permission"
 
 # What a dropped, reset, timed-out or unusable connection raises.
 TRANSPORT_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
@@ -272,8 +278,19 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         not_checked = "Check again with a clean token to check them too"
 
     modern_era, handshake_era = _Era(modern=True), _Era(modern=False)
+    refused = False
+
+    def refuse(why: str) -> None:
+        """Report a recognized 2026-07-28 error, once, wherever it is first seen."""
+        nonlocal refused
+        if not refused:
+            refused = True
+            add(_refused(why))
+
+    first_refusal = ""
     try:  # anonymously, as a client's first request: the current protocol first, then the handshake
         status, headers, body = _call(request, url, None, modern_era, "server/discover", 1)
+        first_refusal = _modern_refusal(headers, body)
         if status == 401:  # 2026-07-28 asks for a token; is the handshake public?
             h_status, h_headers, h_body = _post(request, url, _initialize(), None)
             info = _dict((_message(h_headers, h_body, 1) or {}).get("result"))
@@ -284,6 +301,8 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     except TRANSPORT_ERRORS as exc:
         add(Result("FAIL", "Server reachable", str(exc), _transport_fix(exc)))
         return
+    if first_refusal:  # said now: asking for a token, or a handshake that fails too, can end the check before the verdict
+        refuse(first_refusal)
     if headers.get(FINAL_URL):
         add(Result("INFO", "Redirect", f"{url} redirects to {headers[FINAL_URL]}", f"Clients follow it, but giving them {headers[FINAL_URL]} saves a round trip"))
 
@@ -304,8 +323,13 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         where = headers.get("location", "somewhere else")
         add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} redirects (HTTP {status}) to {where}", "Clients only follow a 307 or 308 that stays on this site; give them the final address"))
         return
+    elif status == 403:  # a missing token is 401; 403 means "valid token, not enough permission"
+        add(Result("FAIL", "Requires sign-in", f"A request without a token got {_why(status, headers, body)}, not 401", SIGN_IN_FIX))
+        if not token:
+            return
     elif status != 200:
-        add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} answered {_why(status, headers, body)}", "Is this the MCP endpoint? Most servers answer at /mcp"))
+        if not first_refusal:  # otherwise the 2026-07-28 error above already says what is wrong
+            add(Result("FAIL", "Answers MCP requests", f"POST {parts.path} answered {_why(status, headers, body)}", "Is this the MCP endpoint? Most servers answer at /mcp"))
         return
     open_first = status == 200  # whether sign-in is needed is decided once tools/list has been tried
     signed_in_checked = status == 401
@@ -314,6 +338,7 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     # listed as the token's user sees them).
     m_status, m_headers, m_body = _call(request, url, token, modern_era, "server/discover", 1)
     discovered = _discovered(m_headers, m_body) if m_status == 200 else {}
+    refusal = "" if discovered else _modern_refusal(m_headers, m_body)  # clients don't fall back from this
     modern_problems = _missing_2026_fields(discovered, discover=True) if discovered else []
     modern_ok = bool(discovered) and not modern_problems
     h_status, h_headers, h_body = _post(request, url, _initialize(), token)
@@ -328,8 +353,10 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         if token and {m_status, h_status} & {401, 403}:
             rejected = h_headers if h_status in (401, 403) else m_headers
             _token_rejected(url, h_status if h_status in (401, 403) else m_status, rejected, request, add, check_sign_in=not signed_in_checked)
+        elif refusal:
+            refuse(refusal)
         else:
-            add(Result("FAIL", "Answers MCP requests", f"server/discover: {_why(m_status, m_headers, m_body)}; initialize: {_why(h_status, h_headers, h_body)}", "The server didn't return an MCP result for either protocol version"))
+            add(Result("FAIL", "Answers MCP requests", f"server/discover:{_why(m_status, m_headers, m_body)}; initialize: {_why(h_status, h_headers, h_body)}", "The server didn't return an MCP result for either protocol version"))
         return
 
     if not token and m_status == 401:
@@ -338,14 +365,20 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
         add(Result("PASS", f"Protocol {MODERN}", _server_name(_dict(_dict(discovered.get("_meta")).get("io.modelcontextprotocol/serverInfo")))))
     elif discovered:
         add(Result("FAIL", f"Protocol {MODERN}", f"server/discover is missing or has wrong {', '.join(modern_problems)}", f"Current clients choose {MODERN} and then reject this reply; update the server's MCP SDK"))
-    else:
+    elif refusal:  # reported even when the handshake works: clients that choose 2026-07-28 won't try it
+        refuse(refusal)
+    elif not refused:  # (if the first request was refused, that FAIL already says so)
         add(Result("INFO", f"Protocol {MODERN}", "Not offered; current clients fall back to the handshake"))
     if handshake_ok:
-        add(Result("PASS", "Handshake protocol", f"{_server_name(_dict(info.get('serverInfo')))}, {info['protocolVersion']}"))
         if h_headers.get("mcp-session-id"):
             handshake_era.headers["mcp-session-id"] = h_headers["mcp-session-id"]
         handshake_era.headers["mcp-protocol-version"] = str(info["protocolVersion"])
-        _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, token, handshake_era.headers)
+        done = _initialized(request, url, token, handshake_era)  # setup isn't finished until this is accepted
+        if 200 <= done < 300:
+            add(Result("PASS", "Handshake protocol", f"{_server_name(_dict(info.get('serverInfo')))}, {info['protocolVersion']}"))
+        else:
+            handshake_ok = False
+            add(Result("FAIL", "Handshake protocol", f"notifications/initialized answered HTTP {done}", "Clients send it right after initialize and stop if it fails; answer it with 202"))
     elif info:
         add(Result("FAIL", "Handshake protocol", "; ".join(handshake_problems), "Clients on the handshake reject this initialize result"))
     elif not token and h_status == 401:
@@ -374,6 +407,9 @@ def _check(url: str, token: str | None, request: Request, add: Callable[[Result]
     if tools_status in (401, 403):
         if token:  # the token was turned down where it matters
             _token_rejected(url, tools_status, tools_headers, request, add, check_sign_in=not signed_in_checked)
+        elif tools_status == 403:  # a missing token is 401, never 403
+            add(Result("FAIL", "Requires sign-in", "Discovery is public; tools/list without a token got HTTP 403, not 401", SIGN_IN_FIX))
+            add(Result("INFO", "Tools not checked", not_checked))
         else:  # discovery is public, the tools aren't: that's sign-in working
             _requires_sign_in(url, tools_headers, request, add, "Discovery is public; tools/list needs a token", not_checked)
         return
@@ -459,8 +495,12 @@ def _anonymous_handshake(request: Request, url: str) -> _Era | None:
     if headers.get("mcp-session-id"):
         era.headers["mcp-session-id"] = headers["mcp-session-id"]
     era.headers["mcp-protocol-version"] = str(info["protocolVersion"])
-    _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, None, era.headers)
-    return era
+    return era if 200 <= _initialized(request, url, None, era) < 300 else None  # a session that can't finish setup isn't open
+
+
+def _initialized(request: Request, url: str, token: str | None, era: _Era) -> int:
+    """Tell the server setup is done (the handshake's last step); returns its HTTP status."""
+    return _post(request, url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, token, era.headers)[0]
 
 
 def _lists_tools(request: Request, url: str, era: _Era) -> tuple[bool, int, Mapping[str, str]]:
@@ -534,7 +574,7 @@ def _content_type_ok(headers: Mapping[str, str]) -> bool:
     return media_type(headers) in ("application/json", "text/event-stream")
 
 
-def _message(headers: Mapping[str, str], body: bytes, id_: int) -> dict[str, Any] | None:
+def _message(headers: Mapping[str, str], body: bytes, id_: object) -> dict[str, Any] | None:
     """The JSON-RPC reply to request `id_`, from JSON or an event stream, as a client reads it.
 
     Clients only accept application/json and text/event-stream, and match replies to
@@ -598,6 +638,26 @@ def _discovered(headers: Mapping[str, str], body: bytes) -> dict[str, Any]:
     result = _dict((_message(headers, body, 1) or {}).get("result"))
     versions = result.get("supportedVersions")
     return result if isinstance(versions, list) and MODERN in versions else {}
+
+
+def _modern_refusal(headers: Mapping[str, str], body: bytes) -> str:
+    """A recognized 2026-07-28 error in this reply ("HeaderMismatch (-32020): ..."), or "" for any other reply."""
+    reply = _message(headers, body, 1) or _message(headers, body, None)  # an unparsed request is answered with id null
+    error = _dict((reply or {}).get("error"))
+    code = error.get("code")
+    if isinstance(code, bool) or not isinstance(code, int) or code not in MODERN_ERRORS:
+        return ""
+    message = " ".join(str(error.get("message") or "").split())[:160]
+    return f"{MODERN_ERRORS[code]} ({code})" + (f": {message}" if message else "")
+
+
+def _refused(why: str) -> Result:
+    return Result(
+        "FAIL",
+        f"Protocol {MODERN}",
+        f"server/discover answered {why}",
+        f"Clients that get this error take the server to speak {MODERN} and don't fall back to the handshake, so they can't connect even though the handshake works; fix what the server rejects",
+    )
 
 
 def _missing_2026_fields(result: Mapping[str, Any], *, discover: bool) -> list[str]:
@@ -686,10 +746,81 @@ def resource_covers(resource: str, url: str) -> bool:
     return (u.path.rstrip("/") + "/").startswith(r.path.rstrip("/") + "/")
 
 
+_PARAM = re.compile(rf"({TOKEN.pattern})\s*=\s*(.*)", re.DOTALL)  # name=value, around a "=" that may have spaces
+
+
+def _split_elements(header: str) -> list[str]:
+    """The comma-separated parts of a header, leaving commas inside quoted strings alone."""
+    parts, start, quoted, escaped = [], 0, False, False
+    for i, char in enumerate(header):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char == ",":
+            parts.append(header[start:i])
+            start = i + 1
+    parts.append(header[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _auth_value(raw: str) -> str:
+    """A parameter's value: a quoted string's text (unescaped), or an unquoted word, as the SDK reads it."""
+    raw = raw.strip()
+    if not raw.startswith('"'):
+        return raw.split(None, 1)[0] if raw else ""
+    text, escaped = [], False
+    for char in raw[1:]:
+        if escaped:
+            text.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            break
+        else:
+            text.append(char)
+    return "".join(text)
+
+
+def _is_value(raw: str) -> bool:
+    """Whether what follows "name=" is a value; "abc==" is a token68 (base64), not a parameter."""
+    return bool(raw.strip()) and not raw.startswith("=")
+
+
+def _challenges(header: str) -> list[tuple[str, dict[str, str]]]:
+    """WWW-Authenticate as (scheme, parameters) pairs with lower-cased names (RFC 9110 section 11.6.1).
+
+    A header can hold several challenges, and repeated headers arrive joined with commas, so
+    `Basic realm="x", Bearer resource_metadata="y"` is two. Where a parameter sits matters: a
+    resource_metadata on a Basic challenge is not the Bearer one's.
+    """
+    found: list[tuple[str, dict[str, str]]] = []
+    for element in _split_elements(header):
+        named = _PARAM.fullmatch(element)
+        if named and _is_value(named.group(2)):  # name=value carries on the challenge before it
+            if found:
+                found[-1][1].setdefault(named.group(1).lower(), _auth_value(named.group(2)))
+            continue
+        scheme = TOKEN.match(element)
+        if scheme is None:
+            continue
+        params: dict[str, str] = {}
+        first = _PARAM.fullmatch(element[scheme.end() :].strip())  # `Bearer realm=x`: the scheme and its first parameter
+        if first and _is_value(first.group(2)):
+            params[first.group(1).lower()] = _auth_value(first.group(2))
+        found.append((scheme.group().lower(), params))
+    return found
+
+
 def _check_sign_in(url: str, headers: Mapping[str, str], request: Request, add: Callable[[Result], None]) -> None:
-    challenge = headers.get("www-authenticate", "")
-    found = re.search(r'resource_metadata=(?:"([^"]+)"|([^\s,]+))', challenge)  # quoted or not, as the SDK reads it
-    linked = (found.group(1) or found.group(2)) if found else None
+    bearer = [params for scheme, params in _challenges(headers.get("www-authenticate", "")) if scheme == "bearer"]
+    linked = next((p["resource_metadata"] for p in bearer if p.get("resource_metadata")), None)  # only the Bearer challenge's
     parts = urlsplit(url)
     base = f"{parts.scheme}://{parts.netloc}"
     candidates = []  # the SDK client's order: the challenge's link, then path-based, then root
@@ -699,7 +830,8 @@ def _check_sign_in(url: str, headers: Mapping[str, str], request: Request, add: 
         add(Result("PASS", "401 points to sign-in", "WWW-Authenticate names the resource metadata"))
         candidates.append(linked)
     else:
-        add(Result("WARN", "401 points to sign-in", "No resource_metadata in WWW-Authenticate", "Clients fall back to the well-known addresses; send resource_metadata in the challenge (RFC 9728)"))
+        where = "the Bearer challenge" if bearer else "WWW-Authenticate (it has no Bearer challenge)"
+        add(Result("WARN", "401 points to sign-in", f"No resource_metadata in {where}", "Clients fall back to the well-known addresses; send a Bearer challenge with resource_metadata (RFC 9728)"))
     if parts.path and parts.path != "/":
         candidates.append(f"{base}/.well-known/oauth-protected-resource{parts.path}")
     candidates.append(f"{base}/.well-known/oauth-protected-resource")
@@ -901,6 +1033,10 @@ def _tool_problem(tool: object, *, strict: bool) -> str:
         return "outputSchema isn't an object"
     if not isinstance(schema.get("properties", {}), dict):
         return "inputSchema properties must be an object"
+    if not strict:  # 2026-07-28 clients drop a tool whose header annotations are invalid
+        problem = _x_mcp_header_problem(schema)
+        if problem:
+            return problem
     if strict:  # 2025-11-25 also constrains these
         for label, part in (("inputSchema", schema), ("outputSchema", output)):
             if part is None:
@@ -913,6 +1049,60 @@ def _tool_problem(tool: object, *, strict: bool) -> str:
             required = part.get("required")
             if required is not None and (not isinstance(required, list) or not all(isinstance(v, str) for v in required)):
                 return f"{label} required must be a list of names"
+    return ""
+
+
+# JSON Schema keywords whose values are schemas, by shape. An annotation under any of them is not on a
+# property clients can reach by name, and `$ref` is never followed. The SDK's walk, so the two agree.
+_SCHEMA_ONE = frozenset({"items", "contains", "unevaluatedItems", "additionalProperties", "propertyNames", "unevaluatedProperties", "not", "if", "then", "else", "contentSchema"})
+_SCHEMA_LIST = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SCHEMA_MAP = frozenset({"patternProperties", "dependentSchemas", "$defs", "definitions"})
+
+
+def _schema_positions(root: object) -> Iterator[tuple[tuple[str, ...] | None, dict[str, Any]]]:
+    """(property names from the root down, schema) for every schema in `root`.
+
+    The names are None once a keyword other than `properties` has been crossed. An explicit
+    stack, so a deeply nested schema can't overflow the recursion limit.
+    """
+    stack: list[tuple[tuple[str, ...] | None, object]] = [((), root)]
+    while stack:
+        path, node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        yield path, node
+        for keyword, value in node.items():
+            if keyword == "properties" and isinstance(value, dict):
+                stack.extend(((*path, name) if path is not None else None, sub) for name, sub in value.items())
+            elif keyword in _SCHEMA_ONE:
+                stack.append((None, value))
+            elif keyword in _SCHEMA_LIST and isinstance(value, list):
+                stack.extend((None, sub) for sub in value)
+            elif keyword in _SCHEMA_MAP and isinstance(value, dict):
+                stack.extend((None, sub) for sub in value.values())
+
+
+def _x_mcp_header_problem(schema: object) -> str:
+    """Why 2026-07-28 clients would drop a tool for its `x-mcp-header` annotations, or "" if they wouldn't.
+
+    The transport spec's rules, as the SDK enforces them: the annotation sits on a property reached
+    through plain `properties`, names an RFC 9110 token, is on a string, integer or boolean property,
+    and is unique across the schema ignoring case.
+    """
+    seen: dict[str, str] = {}
+    for path, node in _schema_positions(schema):
+        if X_MCP_HEADER not in node:
+            continue
+        if not path:
+            return f"{X_MCP_HEADER} is not on a property reached through plain `properties`"
+        where, header, kind = ".".join(path)[:60], node[X_MCP_HEADER], node.get("type")
+        if not isinstance(header, str) or not TOKEN.fullmatch(header):
+            return f"property {where!r}: {X_MCP_HEADER} must be a header name (letters, digits and ! # $ % & ' * + - . ^ _ ` | ~)"
+        if kind not in ("string", "integer", "boolean"):
+            return f"property {where!r}: {X_MCP_HEADER} only works on string, integer or boolean properties"
+        if header.lower() in seen:
+            return f"property {where!r}: {X_MCP_HEADER} {header[:40]!r} repeats the one on {seen[header.lower()]!r}"
+        seen[header.lower()] = where
     return ""
 
 

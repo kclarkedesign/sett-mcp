@@ -39,7 +39,7 @@ Connecting an AI assistant to a real system is easy. Being comfortable leaving i
 Plus the plumbing that usually takes an afternoon:
 
 - A runnable example (a small contacts store) you replace with your real API client
-- `sett-mcp check <url>`: tests any deployed MCP server the way clients will (HTTPS, the sign-in challenge and metadata, PKCE, client registration, both MCP protocol versions clients use, tool descriptions and hints) and says how to fix what fails
+- `sett-mcp check <url>`: tests any deployed MCP server the way clients will (HTTPS, the sign-in challenge and metadata, PKCE, client registration, both MCP protocol versions clients use, down to the errors that stop them falling back, tool descriptions, hints and header annotations) and says how to fix what fails
 - `install <client>` for Claude Desktop, Cursor, Claude Code and Codex, with `--writes` to turn write tools on, and a troubleshooting guide in every project
 - Stdio by default, stateless Streamable HTTP with `serve --http`, tested against the edge cases that break real clients
 - **Remote in one command:** `deploy vercel --auth supabase` hosts the server on your own Vercel account with Supabase for sign-in: a consent page, invite-only users, a writer role for write tools, confirmations that work across server instances, and an audit table. Remote mode also works with any OAuth provider on any host
