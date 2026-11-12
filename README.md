@@ -32,7 +32,7 @@ Connecting an AI assistant to a real system is easy. Being comfortable leaving i
 | **Confirmations** | Destructive tools ask the user first ("Permanently delete contact c001?"), using multi-round-trip requests on the 2026-07-28 protocol and elicitation on older ones. Clients that can't show a prompt are refused, not waved through. See [client support](#client-support). |
 | **Allow / deny lists** | Tools the policy excludes are never registered. |
 | **Field masking** | `email`, `phone` or any field you list becomes `[masked]` before results reach the model or the audit log. A write that passes `[masked]` back is refused, so the placeholder can't overwrite real data. |
-| **Audit log** | One JSON line per call: tool, kind, outcome, duration, masked arguments. |
+| **Audit log** | One JSON line per call: tool, kind, outcome, duration, masked arguments, and the client's name and version, so you can see which clients people use and which can't show confirmation prompts. |
 | **Tool hints** | Every tool is marked read-only or destructive so clients can warn users. |
 | **Strict policy file** | Unknown keys fail at startup, so a typo can't silently turn masking off. |
 

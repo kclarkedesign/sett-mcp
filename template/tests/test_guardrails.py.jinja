@@ -10,7 +10,7 @@ import json
 
 import pytest
 from mcp import Client
-from mcp_types import ElicitResult
+from mcp_types import ElicitResult, Implementation
 
 from {{ package_name }}.guardrails import MASK, Policy, PolicyError
 from {{ package_name }}.server import build_server
@@ -193,6 +193,66 @@ async def test_audit_log_records_each_call_with_masked_arguments(tmp_path):
     entries = [json.loads(line) for line in log.read_text().splitlines()]
     assert [(e["tool"], e["kind"], e["outcome"]) for e in entries] == [(CREATE, "write", "ok"), (GET, "read", "error")]
     assert entries[0]["arguments"]["email"] == MASK
+
+
+def read_audit(log):
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+async def test_audit_rows_name_the_client_that_made_the_call(tmp_path, mode):
+    log = tmp_path / "audit.jsonl"
+    server, _ = make_server(audit_path=log)
+    client_info = Implementation(name="Test Client", version="9.9")
+    async with Client(server, mode=mode, client_info=client_info) as client:
+        await client.call_tool(GET, {"contact_id": "c1"})
+    (row,) = read_audit(log)
+    assert (row["client_name"], row["client_version"]) == ("Test Client", "9.9")
+    assert "user_agent" not in row  # there is no HTTP request in this connection
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+async def test_a_refusal_for_a_client_that_cannot_confirm_names_the_client(tmp_path, mode):
+    log = tmp_path / "audit.jsonl"
+    server, _ = make_server(writes_enabled=True, audit_path=log)
+    client_info = Implementation(name="No Prompts", version="1.2")
+    async with Client(server, mode=mode, client_info=client_info) as client:  # no elicitation support
+        result = await client.call_tool(DELETE, {"contact_id": "c1"})
+    assert result.is_error
+    (row,) = read_audit(log)
+    assert (row["outcome"], row["client_name"], row["client_version"]) == ("blocked", "No Prompts", "1.2")
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+async def test_a_client_name_is_untrusted_text_so_it_is_capped_and_cleaned(tmp_path, mode):
+    # Any client can claim any name. A NUL would make Postgres refuse the whole row, so a hostile
+    # client could keep its own calls out of the audit table.
+    log = tmp_path / "audit.jsonl"
+    server, _ = make_server(audit_path=log)
+    client_info = Implementation(name="Evil\u0000\nClient " + "x" * 1000, version="1 \t.0")
+    async with Client(server, mode=mode, client_info=client_info) as client:
+        await client.call_tool(GET, {"contact_id": "c1"})
+    (row,) = read_audit(log)
+    assert row["client_name"].startswith("Evil Client x") and len(row["client_name"]) == 200
+    assert row["client_version"] == "1 .0"
+    assert all(char.isprintable() for value in (row["client_name"], row["client_version"]) for char in value)
+
+
+def test_untrusted_text_loses_what_postgres_would_refuse():
+    from {{ package_name }}.guardrails import _untrusted
+
+    assert _untrusted("a\u0000b\ud800c") == "a b c"  # NUL and a lone surrogate
+    assert _untrusted("  Claude \n Code  ") == "Claude Code"
+    assert _untrusted("   ") is None and _untrusted("") is None and _untrusted(5) is None and _untrusted(None) is None
+
+
+async def test_the_client_name_never_decides_anything():
+    # A client that calls itself something official gets no more than any other.
+    server, store = make_server(writes_enabled=True)
+    client_info = Implementation(name="Claude Desktop", version="999")
+    async with Client(server, client_info=client_info) as client:  # no elicitation support
+        result = await client.call_tool(DELETE, {"contact_id": "c1"})
+    assert result.is_error and store.get("c1")
 
 
 def test_policy_file_rejects_unknown_keys():

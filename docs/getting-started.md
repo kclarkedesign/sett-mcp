@@ -85,6 +85,8 @@ Before sharing the address, test it the way clients will: `uvx sett-mcp check ht
 
 Then, in claude.ai: **Settings, Connectors, Add custom connector**, paste `https://<your-project>.vercel.app/mcp`, connect, sign in on the consent page (GitHub, or an emailed link opened in the same browser) and choose **Allow**. Your project's `docs/remote.md` has the same steps for Cursor and Codex.
 
+Every call is recorded in an audit table in your Supabase project, with the name and version of the client that made it. Once people are using the server, `docs/remote.md` ("Which clients connect") has two queries to paste into Supabase's SQL Editor: which clients people use, and which can't show confirmation prompts.
+
 Before the first deploy, install and sign in to two command-line tools, once: `npm install -g vercel` then `vercel login`, and the [Supabase CLI](https://supabase.com/docs/guides/cli) then `supabase login`. Both open a browser. The deploy creates the Supabase project itself. If you belong to several Supabase organizations, it asks which: add `--supabase-org "Org name"` (in quotes) or the slug it lists, and pick a free organization unless you mean to pay for the project. Your project's `docs/remote.md` has the details.
 
 ## Updating a project later

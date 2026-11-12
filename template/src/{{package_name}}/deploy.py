@@ -6,9 +6,9 @@ token, and every step can be run again: it checks what is already there first.
 
     1. Check the Vercel CLI login, the Supabase token and the project's signing keys.
     2. Read the project's publishable and secret keys (creating a secret key if needed).
-    3. Link the Vercel project and set its environment variables.
+    3. Link the Vercel project, set its environment variables, and create or update the audit table.
     4. Deploy to production and read the address the server answers at.
-    5. Create the audit table and the token hook that adds that address to each token.
+    5. Create the token hook that adds that address to each token.
     6. Turn on Supabase's OAuth server with this server's consent page; turn off sign-ups.
     7. Check that the server refuses requests without a sign-in, and save the settings.
 
@@ -729,6 +729,10 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     for name, value in settings.items():
         vercel.set_env(name, value)
         say(f"    set {name}")
+    # Before the new code goes live: it writes columns an older table lacks, and Supabase refuses
+    # such rows, so audit rows would be lost until the table caught up.
+    supabase.sql(AUDIT_TABLE_SQL)
+    say("    audit table ready")
 
     say("4/7 Deploying to production (this takes a minute)")
     deployment = vercel.deploy()
@@ -737,8 +741,7 @@ def deploy(options: DeployOptions, supabase: Supabase, vercel: Vercel, request: 
     public = resource.removesuffix("/mcp")
     say(f"    live at {public}")
 
-    say("5/7 Creating the audit table and the token hook")
-    supabase.sql(AUDIT_TABLE_SQL)
+    say("5/7 Creating the token hook")
     supabase.sql(hook_sql(resource))
 
     say("6/7 Turning on Supabase's OAuth server")

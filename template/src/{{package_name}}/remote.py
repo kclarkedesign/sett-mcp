@@ -51,6 +51,12 @@ create table if not exists public.{AUDIT_TABLE} (
   subject text,
   client_id text
 );
+-- Added after the table itself: a table made earlier gets them on the next deploy. client_id is the
+-- OAuth app a user signed in through; these three are what the client says about itself (untrusted).
+alter table public.{AUDIT_TABLE}
+  add column if not exists client_name text,
+  add column if not exists client_version text,
+  add column if not exists user_agent text;
 alter table public.{AUDIT_TABLE} enable row level security;
 -- Newer projects don't grant API roles access to tables made in SQL. The server writes
 -- with the secret key (service_role), and only inserts; nothing else can read or write.

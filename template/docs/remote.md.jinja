@@ -37,9 +37,9 @@ What it does, in order:
 
 1. Checks your Vercel login, the token, and that the project signs tokens with public keys (not a shared secret).
 2. Reads the project's publishable and secret keys, creating a secret key named `sett_server` if there is none.
-3. Links the Vercel project and sets `{{ env_prefix }}_SUPABASE_URL`, `_SUPABASE_PUBLISHABLE_KEY`, `_SUPABASE_SECRET_KEY` and a new `_REQUEST_STATE_KEY` as production environment variables.
+3. Links the Vercel project and sets `{{ env_prefix }}_SUPABASE_URL`, `_SUPABASE_PUBLISHABLE_KEY`, `_SUPABASE_SECRET_KEY` and a new `_REQUEST_STATE_KEY` as production environment variables, then creates the `sett_audit` table, or adds any columns an older one lacks. That comes before the deploy so the new code never writes to a table that is behind it.
 4. Deploys to production and asks the running server which address it answers for.
-5. Creates the `sett_audit` table and the token hook (below), with that address.
+5. Creates the token hook (below), with that address.
 6. Turns on Supabase's OAuth server with dynamic client registration, points it at this server's consent page, turns on the token hook, and turns off open sign-ups.
 7. Checks that `/mcp` answers `401` without a sign-in and the consent page loads, then saves `sett-deploy.json`.
 
@@ -119,8 +119,39 @@ Add the domain in Vercel, make it the production domain, and run the deploy agai
 - **Sign-in required.** Every request needs a bearer token from your authorization server. Without one the server answers `401` and points the client to `/.well-known/oauth-protected-resource/mcp`, which tells it where to sign in. Tokens must be signed by the issuer's keys, unexpired, issued for this server's URL (the audience), and name the app they were issued to (`client_id`, or `azp` for providers such as Auth0), so a website session from the same Supabase project can't be replayed here.
 - **A writer role.** Writes need two keys: `{{ env_prefix }}_ENABLE_WRITES=true` on the server, and the signed-in user's `app_metadata.sett_role` set to `writer`. Readers who try a write tool are refused, and the attempt is logged as `forbidden`. `app_metadata` can only be set with your Supabase secret key; never use `user_metadata`, which users can edit themselves.
 - **Confirmations across instances.** Hosts such as Vercel run several copies of the server. A shared `{{ env_prefix }}_REQUEST_STATE_KEY` lets a confirmation started on one copy finish on another.
-- **An audit trail that outlives the host's logs.** Each call goes to stderr (collected as host logs) and, with a Supabase secret key, to a `sett_audit` table, including who made it.
+- **An audit trail that outlives the host's logs.** Each call goes to stderr (collected as host logs) and, with a Supabase secret key, to a `sett_audit` table, including who made it and which client they used ([below](#which-clients-connect)).
 - **Host checks for your domain.** Requests addressed to any other host are refused (`421`), and browser requests from other websites are refused (`403`). MCP clients such as Claude, ChatGPT, Cursor and Codex connect from their own servers and apps, so they aren't affected; a web page on another site calling this server directly is not supported, and the server sends no CORS headers.
+
+### Which clients connect
+
+Every audit row also names the client that made the call: `client_name` and `client_version` (what the client calls itself, such as "Claude Code" and a version), and `user_agent` (the HTTP header). The same fields are in the JSON lines of the local audit file and on stderr. To read the table, open your Supabase project, **SQL Editor**, paste a query and press **Run**.
+
+Which clients do people use, and when was each last seen:
+
+```sql
+select coalesce(client_name, user_agent, 'unknown') as client, client_version,
+       count(*) as calls, max(time) as last_seen
+from public.sett_audit
+group by 1, 2
+order by calls desc;
+```
+
+Which clients can't show confirmation prompts (every refusal that says "this connection can't carry a prompt" is a row with `outcome = 'blocked'`):
+
+```sql
+select coalesce(client_name, user_agent, 'unknown') as client, client_version, count(*) as refusals
+from public.sett_audit
+where outcome = 'blocked'
+group by 1, 2
+order by refusals desc;
+```
+
+What to expect in the results:
+
+- **Names are self-reported.** Any client can call itself anything, so use them to learn which clients people use, never to decide who may do what. The server doesn't use them for anything but this log, and shortens them to 200 characters.
+- **Older clients show their User-Agent instead.** On the 2026-07-28 protocol, every request carries the client's name. Clients on the older handshake send it once, in a request this stateless server can't connect to the calls that follow, so those rows have a `user_agent` but no `client_name`. The queries above fall back to it.
+- **Rows from before this update have no client** (the columns are empty) and show as `unknown`.
+- **Empty columns after an update?** The table gets the new columns the next time you run the deploy. Until then Supabase refuses the new rows; the "Deploying" table in [troubleshooting.md](troubleshooting.md) has the fix.
 
 ## Settings
 
