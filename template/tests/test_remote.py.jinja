@@ -75,7 +75,7 @@ def envelope(capabilities=None):
     }
 
 
-def call(client, settings, role, arguments, *, capabilities=None, extra=None):
+def call(client, settings, role, arguments, *, capabilities=None, extra=None, user_agent=None):
     body = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -88,6 +88,7 @@ def call(client, settings, role, arguments, *, capabilities=None, extra=None):
         "mcp-protocol-version": "2026-07-28",
         "mcp-method": "tools/call",
         "mcp-name": UPDATE,
+        **({"user-agent": user_agent} if user_agent else {}),
     }
     return client.post("/mcp", json=body, headers=headers)
 
@@ -297,6 +298,26 @@ def test_audit_entries_name_the_signed_in_user(settings, capfd):
     assert entry["outcome"] == "ok"
     assert entry["subject"] == "user-1"
     assert entry["client_id"] == "client-1"
+
+
+def test_audit_entries_name_the_client_and_its_user_agent(settings, capfd):
+    with TestClient(app_for(settings, new_store()), base_url="https://mcp.example.com") as client:
+        call(client, settings, "writer", {"contact_id": "c1", "company": "Harbor"}, user_agent="Some Client/3.1")
+    lines = [line for line in capfd.readouterr().err.splitlines() if line.startswith("audit ")]
+    entry = json.loads(lines[-1].removeprefix("audit "))
+    assert (entry["client_name"], entry["client_version"]) == ("test", "1")  # the envelope's clientInfo
+    assert entry["user_agent"] == "Some Client/3.1"
+
+
+def test_audit_columns_exist_for_every_key_an_entry_can_have():
+    # An entry key without a column makes Supabase refuse the whole row (and the sink fails open),
+    # so a new key has to come with its column.
+    keys = ["time", "tool", "kind", "outcome", "duration_ms", "arguments", "subject", "client_id", "client_name", "client_version", "user_agent"]
+    for key in keys:
+        assert f"{key} " in remote_module.AUDIT_TABLE_SQL, key
+    # Tables made before these columns existed get them from the same SQL on the next deploy.
+    for key in ("client_name", "client_version", "user_agent"):
+        assert f"add column if not exists {key} text" in remote_module.AUDIT_TABLE_SQL, key
 
 
 @pytest.mark.anyio

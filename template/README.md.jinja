@@ -12,7 +12,7 @@ Built with [Sett](https://github.com/kclarkedesign/sett-mcp) on the official MCP
 | Confirmations | Destructive tools ask the user before running. Clients that can't show a prompt are refused, not waved through. |
 | Allow / deny lists | Tools the policy excludes are never registered. |
 | Field masking | Fields like `email` and `phone` are replaced with `[masked]` before results reach the model. |
-| Audit log | One JSON line per tool call, with masked arguments and the outcome. |
+| Audit log | One JSON line per tool call, with masked arguments, the outcome and the name and version of the client that made it. |
 | Tool hints | Every tool is marked read-only or destructive, so clients can warn users. |
 
 ## Quick start

@@ -13,7 +13,9 @@ four rules taken from the policy:
    refused, so a model can't overwrite real data with it.
 
 Each call is also appended to a JSON Lines audit log when one is configured, and sent to
-any extra audit sinks (remote mode adds stderr and a Supabase table).
+any extra audit sinks (remote mode adds stderr and a Supabase table). Every entry names the
+client by the name and version it reports for itself (and, over HTTP, its User-Agent). That is
+untrusted text, kept to say which clients people use, and never used to decide anything.
 
 In remote mode a fifth rule applies: write tools also require the signed-in user's
 writer role. It narrows what `<PREFIX>_ENABLE_WRITES` allows; it can never widen it.
@@ -21,6 +23,7 @@ writer role. It narrows what `<PREFIX>_ENABLE_WRITES` allows; it can never widen
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import inspect
 import json
@@ -200,6 +203,60 @@ class AuditSink(typing.Protocol):
     def write(self, entry: dict[str, Any]) -> Awaitable[None]: ...
 
 
+MAX_CLIENT_TEXT = 200
+
+
+def _untrusted(value: object) -> str | None:
+    """Text a client chose for itself, made safe to keep: printable, on one line, at most 200 characters.
+
+    A client can call itself anything. Control characters and lone surrogates would make Postgres
+    refuse the whole audit row, which would let a client keep its own calls out of the log.
+    """
+    if not isinstance(value, str):
+        return None
+    text = " ".join("".join(c if c.isprintable() else " " for c in value[: MAX_CLIENT_TEXT * 4]).split())
+    return text[:MAX_CLIENT_TEXT] or None
+
+
+@dataclass(frozen=True)
+class _Client:
+    name: str | None = None
+    version: str | None = None
+    user_agent: str | None = None
+
+
+# Who is calling, for the audit log only. Set around each request by `_remember_client`.
+_client: contextvars.ContextVar[_Client | None] = contextvars.ContextVar("client", default=None)
+
+
+async def _remember_client(ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
+    """Middleware: note which client is calling, so audit rows can name it.
+
+    The name and version are what the client says about itself: `clientInfo` in `initialize`
+    (2025-11-25 and earlier) or in each request's `_meta` (2026-07-28). The SDK keeps both in
+    `session.client_params`. Over stateless HTTP, a 2025-11-25 client's `initialize` is a request of
+    its own, so later calls carry no name and only the User-Agent header is left. Everything here is
+    untrusted text for the log, never an input to a decision.
+    """
+    try:
+        params = ctx.session.client_params
+        info = params.client_info if params is not None else None
+        headers = getattr(ctx.request, "headers", None)
+        client = _Client(
+            _untrusted(getattr(info, "name", None)),
+            _untrusted(getattr(info, "version", None)),
+            _untrusted(headers.get("user-agent")) if headers is not None else None,
+        )
+    except Exception:  # noting the client must never fail the call
+        log.exception("Could not read the client's name")
+        client = _Client()
+    token = _client.set(client)
+    try:
+        return await call_next(ctx)
+    finally:
+        _client.reset(token)
+
+
 class Guardrails:
     """Registers tools on an `MCPServer` under a `Policy`.
 
@@ -220,6 +277,8 @@ class Guardrails:
         self._writer_check = writer_check
         self._audit_sinks = tuple(audit_sinks)
         self._registered: list[str] = []
+        if _remember_client not in server.middleware:  # once, however many Guardrails share a server
+            server.middleware.append(_remember_client)
 
     @property
     def registered(self) -> tuple[str, ...]:
@@ -419,6 +478,11 @@ class Guardrails:
         if token is not None:
             entry["subject"] = token.subject
             entry["client_id"] = token.client_id
+        client = _client.get()
+        if client is not None:  # what the client says about itself; absent when it said nothing
+            for key, value in (("client_name", client.name), ("client_version", client.version), ("user_agent", client.user_agent)):
+                if value:
+                    entry[key] = value
         if path is not None:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)

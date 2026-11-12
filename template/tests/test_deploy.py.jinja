@@ -142,6 +142,7 @@ def test_deploy_sets_everything_up(run, tmp_path):
     queries = [c[3]["query"] for c in supabase.sent("POST", "/database/query")]
     assert "create table if not exists public.sett_audit" in queries[0]
     assert "grant insert on table public.sett_audit to service_role" in queries[0]  # newer projects need it
+    assert "add column if not exists client_name text" in queries[0]  # a table from before gets the new columns
     assert f"resource text := '{RESOURCE}';" in queries[1]
 
     auth = supabase.sent("PATCH", "/config/auth")[0][3]
@@ -173,6 +174,27 @@ def test_steps_run_in_a_safe_order(run):
     sql_at = next(i for i, c in enumerate(supabase.calls) if c[1].endswith("/database/query"))
     patch_at = next(i for i, c in enumerate(supabase.calls) if c[0] == "PATCH")
     assert sql_at < patch_at
+
+
+def test_the_audit_table_is_ready_before_the_new_code_goes_live(run):
+    # The new server writes columns an old table doesn't have, and Supabase refuses such rows, so
+    # for as long as the table lags the code, audit rows are lost.
+    order = []
+
+    class SupabaseSpy(FakeSupabase):
+        def __call__(self, method, url, headers, body):
+            if url.endswith("/database/query") and "sett_audit" in json.loads(body)["query"]:
+                order.append("audit table")
+            return super().__call__(method, url, headers, body)
+
+    class VercelSpy(FakeVercel):
+        def __call__(self, argv, stdin):
+            if "deploy" in argv:
+                order.append("deploy")
+            return super().__call__(argv, stdin)
+
+    run(supabase=SupabaseSpy(), vercel=VercelSpy())
+    assert order == ["audit table", "deploy"]
 
 
 def test_linking_names_the_current_team_so_vercel_doesnt_ask(run, tmp_path):
