@@ -78,7 +78,7 @@ audit:
   path: ~/.{{ project_slug }}/audit.jsonl
 ```
 
-Unknown keys are an error, so a typo like `mask_feilds` fails at startup instead of silently leaking data.
+Unknown keys are an error, so a typo like `mask_feilds` fails at startup instead of silently leaking data. The same goes for a blank name in `mask_fields`, `allow`, `deny` or `mask_patterns.fields` (an empty `""` entry matches nothing, so it is refused). Stray spaces around a name are ignored.
 
 ### Masking free text
 

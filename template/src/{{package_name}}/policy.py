@@ -24,10 +24,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +42,23 @@ class PolicyError(ValueError):
     """The policy file is missing, malformed or contains unknown keys."""
 
 
+def _clean_names(names: list[str]) -> list[str]:
+    # A blank name matches nothing, and so does a name with stray spaces. Quietly, which is worst
+    # in `deny` (the tool stays registered) and `mask_fields` (the field stays visible).
+    names = [name.strip() for name in names]
+    if not all(names):
+        raise ValueError("names can't be blank")
+    return names
+
+
+# A list of tool or field names from the policy file: stripped, and refused if any is blank.
+_Names = Annotated[list[str], AfterValidator(_clean_names)]
+
+
 class _ToolLists(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    allow: list[str] | None = None
-    deny: list[str] = []
+    allow: _Names | None = None
+    deny: _Names = []
 
 
 class _Audit(BaseModel):
@@ -56,17 +69,8 @@ class _Audit(BaseModel):
 class _MaskPatterns(BaseModel):
     # Both lists must name something: an empty one would be a policy that quietly hides nothing.
     model_config = ConfigDict(extra="forbid")
-    fields: list[str] = Field(min_length=1)
+    fields: _Names = Field(min_length=1)
     kinds: list[PatternKind] = Field(default_factory=lambda: list(PATTERN_KINDS), min_length=1)
-
-    @field_validator("fields")
-    @classmethod
-    def _names_are_not_blank(cls, names: list[str]) -> list[str]:
-        # A blank name matches no field, and a name with stray spaces matches none either.
-        names = [name.strip() for name in names]
-        if not all(names):
-            raise ValueError("field names can't be blank")
-        return names
 
 
 class _PolicyFile(BaseModel):
@@ -77,7 +81,7 @@ class _PolicyFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     confirm: ConfirmMode = "destructive"
     tools: _ToolLists = _ToolLists()
-    mask_fields: list[str] = []
+    mask_fields: _Names = []
     mask_patterns: _MaskPatterns | None = None
     audit: _Audit = _Audit()
 

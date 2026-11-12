@@ -544,6 +544,32 @@ def test_a_mistake_in_mask_patterns_fails_at_startup(text):
         Policy.from_yaml(text)
 
 
+def test_stray_spaces_in_the_other_name_lists_are_ignored_too():
+    # Same trap in `mask_fields` and `tools`. A padded `deny` name that matched nothing would leave the tool registered.
+    policy = Policy.from_yaml('mask_fields: [" Email "]\ntools:\n  allow: [" read_it"]\n  deny: ["write_it "]\n')
+    assert policy.mask_fields == {"email"}
+    assert policy.allow == {"read_it"}
+    assert policy.deny == {"write_it"}
+    assert not policy.permits("write_it")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'mask_fields: [""]\n',  # a blank name matches no field
+        'mask_fields: ["   "]\n',
+        'mask_fields: [email, ""]\n',  # one good name doesn't excuse a blank one
+        'tools:\n  deny: [""]\n',
+        'tools:\n  deny: [write_it, " "]\n',
+        'tools:\n  allow: [""]\n',  # would register no tool at all
+        'tools:\n  allow: [read_it, ""]\n',
+    ],
+)
+def test_a_blank_name_in_the_policy_lists_fails_at_startup(text):
+    with pytest.raises(PolicyError, match="blank"):
+        Policy.from_yaml(text)
+
+
 def test_policy_file_rejects_unknown_keys():
     with pytest.raises(PolicyError):
         Policy.from_yaml("mask_feilds: [email]")
