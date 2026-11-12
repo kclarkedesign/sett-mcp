@@ -18,5 +18,13 @@ mask_fields:
   - email
   - phone
 
+# Optional: also hide email addresses and phone numbers typed into free text, in place
+# ("Call me at [masked]"). Only the fields you list are scanned. It is a pattern match, so it can miss
+# and over-match: keep whole-field masking above wherever the data has a field of its own.
+# The sample contacts have no free-text field, so this is off here. See README, "Masking free text".
+# mask_patterns:
+#   fields: [notes, description]
+#   kinds: [email, phone]
+
 audit:
   path: ~/.{{ project_slug }}/audit.jsonl   # one JSON line per tool call; remove to disable

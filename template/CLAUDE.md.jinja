@@ -22,7 +22,7 @@ MCP server on the official Python SDK v2 (`mcp>=2.3`, `MCPServer`, not v1's `Fas
   - The docstring's first line says what the tool does. The rest says when to use it instead of a similar tool (search vs get), what it returns, and any precondition (search before create).
   - Every parameter gets `Annotated[type, Field(description=...)]`, including the format of ids and the allowed range of numbers (`Field(ge=1, le=100)`). Shared parameter types live at the top of `tools.py`.
   - Directories such as Glama score tools on these points, and models pick tools by them.
-- Return dicts or lists of dicts so field masking can see field names.
+- Return dicts or lists of dicts so field masking can see field names. Free-text fields (notes, descriptions) can hold personal data that masking by name can't see: list them under `mask_patterns` in the policy.
 - Raise `ToolError` for failures the model should see and react to (not found, bad input). `MCPError` becomes a protocol error instead.
 - Never log to stdout: over stdio, stdout is the protocol channel.
 - Writes are enabled only by `{{ env_prefix }}_ENABLE_WRITES`. Don't add another way to turn them on.

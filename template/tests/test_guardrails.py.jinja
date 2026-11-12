@@ -10,9 +10,11 @@ import json
 
 import pytest
 from mcp import Client
+from mcp.server.mcpserver import MCPServer
 from mcp_types import ElicitResult, Implementation
+from pydantic import BaseModel
 
-from {{ package_name }}.guardrails import MASK, Policy, PolicyError
+from {{ package_name }}.guardrails import MASK, Guardrails, Policy, PolicyError
 from {{ package_name }}.server import build_server
 from {{ package_name }}.store import ContactStore
 
@@ -253,6 +255,234 @@ async def test_the_client_name_never_decides_anything():
     async with Client(server, client_info=client_info) as client:  # no elicitation support
         result = await client.call_tool(DELETE, {"contact_id": "c1"})
     assert result.is_error and store.get("c1")
+
+
+# --- Pattern masking: personal data inside the free-text fields you name ---------------
+
+NOTE = {
+    "id": "n1",
+    "title": "Call ada@example.org",  # not a listed field, so left alone
+    "notes": "Call Ada at 555-0101 or ada@example.org tomorrow.",
+    "nested": {
+        "description": ["Mei: +1 (555) 010-1234", {"text": "mei@example.org"}],
+    },
+    "when": "2026-11-11 10:30",
+    "ref": "ticket 1234 for order 1234567890",
+}
+LISTED = {"mask_pattern_fields": frozenset({"notes", "description"})}
+
+
+class Note(BaseModel):
+    notes: str
+
+
+def notes_server(**policy):
+    """A server with a read tool that returns NOTE and write tools that keep what they are given."""
+    saved = []
+    server = MCPServer("t")
+    guard = Guardrails(server, Policy(writes_enabled=True, **policy))
+
+    @guard.read(name="get_note")
+    def get_note() -> dict:
+        return NOTE
+
+    @guard.write(name="set_note", destructive=False)
+    def set_note(note_id: str, notes: str) -> dict:
+        saved.append(notes)
+        return {"id": note_id}
+
+    @guard.write(name="set_note_model", destructive=False)
+    def set_note_model(note: Note) -> dict:
+        saved.append(note.notes)
+        return {"id": "n1"}
+
+    return server, saved
+
+
+async def read_note(**policy):
+    server, _ = notes_server(**policy)
+    async with Client(server) as client:
+        return json.loads((await client.call_tool("get_note", {})).content[0].text)
+
+
+async def test_pattern_masking_replaces_matches_in_place_and_leaves_the_rest_readable():
+    note = await read_note(**LISTED)
+    assert note["notes"] == "Call Ada at [masked] or [masked] tomorrow."
+
+
+async def test_pattern_masking_reaches_nested_text_in_a_listed_field():
+    note = await read_note(**LISTED)
+    assert note["nested"]["description"] == ["Mei: [masked]", {"text": "[masked]"}]
+
+
+async def test_pattern_masking_leaves_unlisted_fields_and_ordinary_numbers_alone():
+    note = await read_note(**LISTED)
+    for key in ("id", "title", "when", "ref"):  # title holds an email, but it is not a listed field
+        assert note[key] == NOTE[key], key
+
+
+async def test_nothing_is_scanned_unless_the_policy_lists_fields():
+    assert await read_note() == NOTE
+
+
+async def test_only_the_listed_kinds_are_hidden():
+    note = await read_note(**LISTED, mask_pattern_kinds=frozenset({"email"}))
+    assert note["notes"] == "Call Ada at 555-0101 or [masked] tomorrow."
+
+
+async def test_a_whole_field_mask_wins_over_pattern_masking():
+    note = await read_note(**LISTED, mask_fields=frozenset({"notes"}))
+    assert note["notes"] == MASK
+
+
+async def test_the_audit_log_holds_the_masked_text(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    server, saved = notes_server(**LISTED, confirm="off", audit_path=log)
+    async with Client(server) as client:
+        await client.call_tool("set_note", {"note_id": "n1", "notes": "reach me at ada@example.org"})
+    assert saved == ["reach me at ada@example.org"]  # the tool itself gets the real text
+    (row,) = [json.loads(line) for line in log.read_text().splitlines()]
+    assert row["arguments"]["notes"] == "reach me at [masked]"
+
+
+async def test_the_confirmation_prompt_shows_the_masked_text():
+    server, saved = notes_server(**LISTED, confirm="all_writes")
+    prompts = []
+
+    async def callback(context, params):
+        prompts.append(params.message)
+        return ElicitResult(action="accept", content={})
+
+    async with Client(server, elicitation_callback=callback) as client:
+        await client.call_tool("set_note", {"note_id": "n1", "notes": "reach me at ada@example.org"})
+    assert prompts == ["Allow set_note(note_id='n1', notes='reach me at [masked]')?"]
+    assert saved == ["reach me at ada@example.org"]
+
+
+@pytest.mark.parametrize("confirm", ["off", "all_writes"])
+@pytest.mark.parametrize("notes", ["call me at [masked]", "[masked]", "x [masked] y [masked]"])
+async def test_a_write_that_passes_the_placeholder_back_in_a_listed_field_is_refused(confirm, notes):
+    server, saved = notes_server(**LISTED, confirm=confirm)
+    prompts = []
+
+    async def callback(context, params):
+        prompts.append(params.message)
+        return ElicitResult(action="accept", content={})
+
+    async with Client(server, elicitation_callback=callback) as client:
+        result = await client.call_tool("set_note", {"note_id": "n1", "notes": notes})
+    assert result.is_error and "placeholder" in result.content[0].text
+    assert prompts == [] and saved == []  # nobody was asked, and nothing was written
+
+
+async def test_the_placeholder_is_refused_inside_a_model_argument_too():
+    server, saved = notes_server(**LISTED)
+    note = {"notes": "call me at [masked]"}
+    async with Client(server) as client:
+        result = await client.call_tool("set_note_model", {"note": note})
+    assert result.is_error and "placeholder" in result.content[0].text and saved == []
+
+
+async def test_a_write_with_ordinary_text_in_a_listed_field_goes_through():
+    server, saved = notes_server(**LISTED, confirm="off")
+    async with Client(server) as client:
+        result = await client.call_tool("set_note", {"note_id": "n1", "notes": "call me tomorrow, ada@example.org"})
+    assert not result.is_error
+    assert saved == ["call me tomorrow, ada@example.org"]  # writing real text is allowed; hiding applies to what is read
+
+
+SCANNED = [
+    # hidden
+    ("write to ada@example.org now", "write to [masked] now"),
+    ("<Ada.Park+crm@mail.example.co.uk>", "<[masked]>"),
+    ("'john.o'brien@example.org' and ADA@EXAMPLE.ORG", "'[masked]' and [masked]"),
+    ("ada@example.org;mei@example.org,sam@example.org", "[masked];[masked],[masked]"),
+    ("call 555-0101", "call [masked]"),
+    ("call 555-0101.", "call [masked]."),
+    ("tel:555-0101 ext 22", "tel:[masked] ext 22"),
+    ("555-0101, 555-0102", "[masked], [masked]"),
+    ("(555) 010-1234", "[masked]"),
+    ("(555)010-1234", "[masked]"),
+    ("555.010.1234", "[masked]"),
+    ("1-800-555-0101", "[masked]"),
+    ("+1 555 010 1234", "[masked]"),
+    ("+1-555-010-1234", "[masked]"),
+    ("+1 (555) 010-1234", "[masked]"),
+    ("+44 20 7946 0958", "[masked]"),
+    ("+44 (0)20 7946 0958", "[masked]"),
+    ("+15550101234", "[masked]"),
+    # left alone
+    ("ada@example", "ada@example"),  # no top-level domain
+    ("ask @ada on the forum", "ask @ada on the forum"),
+    ("2026-11-11", "2026-11-11"),
+    ("2026-11-11 10:30:00", "2026-11-11 10:30:00"),
+    ("11-11-2026", "11-11-2026"),
+    ("served 1990-2020", "served 1990-2020"),
+    ("Order #4471-2290, invoice 2026-0042", "Order #4471-2290, invoice 2026-0042"),
+    ("zip 94103-1234", "zip 94103-1234"),
+    ("host 192.168.100.200", "host 192.168.100.200"),
+    ("ticket 1234", "ticket 1234"),
+    ("order 1234567890", "order 1234567890"),  # a plain run of digits could be anything
+    ("$1,000,000 and $12.50", "$1,000,000 and $12.50"),
+    ("version 2.10.123", "version 2.10.123"),
+    ("ref-555-0101", "ref-555-0101"),  # part of a longer reference
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), SCANNED)
+def test_what_the_built_in_patterns_hide_and_what_they_leave(text, expected):
+    policy = Policy(mask_pattern_fields=frozenset({"notes"}))
+    assert policy.mask({"notes": text}) == {"notes": expected}
+
+
+def test_a_long_run_of_pattern_characters_is_scanned_quickly():
+    import time
+
+    policy = Policy(mask_pattern_fields=frozenset({"notes"}))
+    nasty = "a" * 100_000 + " " + "1 " * 50_000 + "-".join(["12"] * 20_000)
+    started = time.monotonic()
+    policy.mask({"notes": nasty})
+    assert time.monotonic() - started < 5
+
+
+def test_mask_patterns_in_the_policy_file():
+    policy = Policy.from_yaml("mask_patterns:\n  fields: [Notes, description]\n  kinds: [email]\n")
+    assert policy.mask_pattern_fields == {"notes", "description"}
+    assert policy.mask_pattern_kinds == {"email"}
+
+
+def test_the_example_in_the_default_policy_is_valid_when_uncommented():
+    from importlib import resources
+
+    text = resources.files("{{ package_name }}").joinpath("default_policy.yaml").read_text()
+    example = ("# mask_patterns:", "#   fields:", "#   kinds:")
+    lines = [line.removeprefix("# ") if line.startswith(example) else line for line in text.splitlines()]
+    policy = Policy.from_yaml("\n".join(lines))
+    assert policy.mask_pattern_fields == {"notes", "description"}
+    assert policy.mask_pattern_kinds == {"email", "phone"}
+
+
+def test_every_kind_is_used_unless_the_policy_narrows_them():
+    policy = Policy.from_yaml("mask_patterns:\n  fields: [notes]\n")
+    assert policy.mask_pattern_kinds == {"email", "phone"}
+    assert Policy().mask_pattern_fields == frozenset()  # and with no section, nothing is scanned
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mask_patterns:\n  feilds: [notes]\n",  # a typo in a key
+        "mask_patterns:\n  fields: [notes]\n  kinds: [emial]\n",  # a typo in a kind
+        "mask_patterns:\n  fields: [notes]\n  kinds: []\n",  # nothing to look for
+        "mask_patterns:\n  fields: []\n",  # nothing to scan
+        "mask_patterns:\n  kinds: [email]\n",  # no fields
+        "mask_patterns: [notes]\n",  # the wrong shape
+        "mask_pattern:\n  fields: [notes]\n",  # a typo in the section name
+    ],
+)
+def test_a_mistake_in_mask_patterns_fails_at_startup(text):
+    with pytest.raises(PolicyError):
+        Policy.from_yaml(text)
 
 
 def test_policy_file_rejects_unknown_keys():

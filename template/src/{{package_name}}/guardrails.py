@@ -9,8 +9,9 @@ four rules taken from the policy:
 3. Confirmation: destructive calls pause and ask the user first. Clients that can't
    show a prompt are refused rather than allowed through.
 4. Masking: fields such as `email` are replaced before a result reaches the model,
-   and in the audit log. A write that passes the "[masked]" placeholder back is
-   refused, so a model can't overwrite real data with it.
+   and in the audit log. In free-text fields you name, email addresses and phone
+   numbers inside the text are replaced in place. A write that passes the "[masked]"
+   placeholder back is refused, so a model can't overwrite real data with it.
 
 Each call is also appended to a JSON Lines audit log when one is configured, and sent to
 any extra audit sinks (remote mode adds stderr and a Supabase table). Every entry names the
@@ -29,6 +30,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import string
 import time
 import typing
@@ -54,12 +56,14 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
 MASK = "[masked]"
 ConfirmMode = Literal["destructive", "all_writes", "off"]
+PatternKind = Literal["email", "phone"]
+PATTERN_KINDS: tuple[PatternKind, ...] = ("email", "phone")
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -78,6 +82,13 @@ class _Audit(BaseModel):
     path: str | None = None
 
 
+class _MaskPatterns(BaseModel):
+    # Both lists must name something: an empty one would be a policy that quietly hides nothing.
+    model_config = ConfigDict(extra="forbid")
+    fields: list[str] = Field(min_length=1)
+    kinds: list[PatternKind] = Field(default_factory=lambda: list(PATTERN_KINDS), min_length=1)
+
+
 class _PolicyFile(BaseModel):
     # extra="forbid" turns a typo like `mask_feilds` into a startup error instead of a
     # silently unmasked field. It also means the file cannot carry a `writes` key:
@@ -87,6 +98,7 @@ class _PolicyFile(BaseModel):
     confirm: ConfirmMode = "destructive"
     tools: _ToolLists = _ToolLists()
     mask_fields: list[str] = []
+    mask_patterns: _MaskPatterns | None = None
     audit: _Audit = _Audit()
 
 
@@ -98,6 +110,9 @@ class Policy:
     deny: frozenset[str] = frozenset()
     mask_fields: frozenset[str] = frozenset()
     audit_path: Path | None = None
+    # Free-text fields whose email addresses and phone numbers are hidden in place (see `mask`).
+    mask_pattern_fields: frozenset[str] = frozenset()
+    mask_pattern_kinds: frozenset[str] = frozenset(PATTERN_KINDS)
 
     @classmethod
     def load(
@@ -130,6 +145,7 @@ class Policy:
             parsed = _PolicyFile.model_validate(raw)
         except (yaml.YAMLError, ValidationError) as exc:
             raise PolicyError(f"Invalid policy: {exc}") from exc
+        patterns = parsed.mask_patterns
         return cls(
             writes_enabled=writes_enabled,
             confirm=parsed.confirm,
@@ -137,10 +153,16 @@ class Policy:
             deny=frozenset(parsed.tools.deny),
             mask_fields=frozenset(f.lower() for f in parsed.mask_fields),
             audit_path=Path(parsed.audit.path).expanduser() if parsed.audit.path else None,
+            mask_pattern_fields=frozenset(f.lower() for f in patterns.fields) if patterns else frozenset(),
+            mask_pattern_kinds=frozenset(patterns.kinds) if patterns else frozenset(PATTERN_KINDS),
         )
 
     def permits(self, tool: str) -> bool:
         return tool not in self.deny and (self.allow is None or tool in self.allow)
+
+    def mask(self, value: Any) -> Any:
+        """`value` as the model may see it: masked fields replaced, personal data hidden in the pattern fields."""
+        return mask(value, self.mask_fields, self.mask_pattern_fields, self.mask_pattern_kinds)
 
 
 def _read_policy_text(path: Path) -> str:
@@ -150,21 +172,70 @@ def _read_policy_text(path: Path) -> str:
         raise PolicyError(f"Cannot read policy file {path}: {exc}") from exc
 
 
-def mask(value: Any, fields: frozenset[str]) -> Any:
-    """Replace the values of `fields` (case-insensitive) anywhere in a nested result.
+# The built-in patterns are deliberately conservative: a missed number is a known limit (the docs say
+# so), while hiding an order number hides something the model may need. They are bounded, so a long
+# run of look-alike characters can't make the scan slow.
+_EMAIL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._%+\-']{0,63}@(?:[A-Za-z0-9\-]{1,63}\.)+[A-Za-z]{2,24}")
+# Phone numbers are matched by the shapes people write them in, not by "some digits": 555-0101,
+# 555.010.1234, (555) 010-1234, 1-800-555-0101, +1 555 010 1234, +44 20 7946 0958, +15550101234.
+# So ids and dates (4471-2290, 2026-0042, 2026-11-11, 94103-1234) and plain digit runs are left alone.
+_PHONE = re.compile(
+    r"(?<![\w.\-+])"  # not the tail of a longer token, number or reference
+    r"(?:\+\d{8,15}"  # +15550101234
+    r"|\+\d{1,3}(?:(?:[ .\-]|(?<=\)))\(?\d{1,4}\)?){2,6}"  # +44 20 7946 0958, +1 (555) 010-1234
+    r"|(?:1[ .\-])?(?:\(\d{3}\)[ .\-]?|\d{3}[ .\-])\d{3}[ .\-]\d{4}"  # (555) 010-1234, 555.010.1234, 1-800-555-0101
+    r"|\d{3}[ .\-]\d{4})"  # 555-0101
+    r"(?!\w|[.\-]\d)"  # nor the start of a longer one
+)
 
-    Empty values (None) are left alone, so "not set" doesn't read as "hidden".
+
+def _hide_phone(found: re.Match[str]) -> str:
+    text = found.group()
+    return MASK if 7 <= sum(char.isdigit() for char in text) <= 15 else text  # E.164 numbers have at most 15 digits
+
+
+def _scan(text: str, kinds: frozenset[str]) -> str:
+    """`text` with the email addresses and phone numbers (as far as `kinds` asks) replaced in place."""
+    if "email" in kinds and "@" in text:
+        text = _EMAIL.sub(MASK, text)
+    if "phone" in kinds:
+        text = _PHONE.sub(_hide_phone, text)
+    return text
+
+
+def mask(
+    value: Any,
+    fields: frozenset[str],
+    text_fields: frozenset[str] = frozenset(),
+    kinds: frozenset[str] = frozenset(),
+) -> Any:
+    """Hide what the policy says the model must not see, anywhere in a nested result.
+
+    The values of `fields` (case-insensitive) are replaced whole. In `text_fields`, only the email
+    addresses and phone numbers (`kinds`) inside the text are replaced, so the rest stays readable.
+    A field in both is replaced whole. Empty values (None) are left alone, so "not set" doesn't
+    read as "hidden".
     """
-    if not fields:
+    scan = bool(text_fields and kinds)
+    if not fields and not scan:
         return value
+    return _mask(value, fields, text_fields if scan else frozenset(), kinds, False)
+
+
+def _mask(value: Any, fields: frozenset[str], text_fields: frozenset[str], kinds: frozenset[str], scanning: bool) -> Any:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
     if isinstance(value, Mapping):
         return {
-            k: MASK if str(k).lower() in fields and v is not None else mask(v, fields) for k, v in value.items()
+            k: MASK
+            if str(k).lower() in fields and v is not None
+            else _mask(v, fields, text_fields, kinds, scanning or str(k).lower() in text_fields)
+            for k, v in value.items()
         }
     if isinstance(value, list | tuple):
-        return [mask(v, fields) for v in value]
+        return [_mask(v, fields, text_fields, kinds, scanning) for v in value]
+    if scanning and isinstance(value, str):
+        return _scan(value, kinds)
     return value
 
 
@@ -189,13 +260,17 @@ class _NotAsked(Confirmation):
     """Returned by the resolver when the call will be refused anyway, so the user isn't asked."""
 
 
-def _holds_mask(value: Any) -> bool:
+def _holds_mask(value: Any, text_fields: frozenset[str] = frozenset(), scanning: bool = False) -> bool:
+    """Whether a write hands the placeholder back: a value that is `[masked]`, or, in a pattern-masked
+    field, text that contains it. Writing it would overwrite the real value (or the real text) with it."""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
     if isinstance(value, str):
-        return value == MASK
-    if isinstance(value, dict):
-        return any(_holds_mask(v) for v in value.values())
+        return value == MASK or (scanning and MASK in value)
+    if isinstance(value, Mapping):
+        return any(_holds_mask(v, text_fields, scanning or str(k).lower() in text_fields) for k, v in value.items())
     if isinstance(value, list | tuple):
-        return any(_holds_mask(v) for v in value)
+        return any(_holds_mask(v, text_fields, scanning) for v in value)
     return False
 
 
@@ -374,7 +449,7 @@ class Guardrails:
                 raise ValueError(f"confirm_message for {tool} names unknown arguments: {sorted(unknown)}")
 
         def resolver(guardrails_ctx: Context, **arguments: Any) -> Any:
-            if _holds_mask(arguments) or not self._may_write():
+            if _holds_mask(arguments, self._policy.mask_pattern_fields) or not self._may_write():
                 return _NotAsked()
             capabilities = guardrails_ctx.client_capabilities
             if capabilities is None or capabilities.elicitation is None:
@@ -383,7 +458,7 @@ class Guardrails:
                 text = message.format(**arguments)
             else:
                 given = {k: v for k, v in arguments.items() if v is not None}  # skip unset optionals
-                shown = ", ".join(f"{k}={v!r}" for k, v in mask(given, self._policy.mask_fields).items())
+                shown = ", ".join(f"{k}={v!r}" for k, v in self._policy.mask(given).items())
                 text = f"Allow {tool}({shown})?"
             return Elicit(text, Confirmation)
 
@@ -439,11 +514,11 @@ class Guardrails:
             )
 
     async def _refuse_masked(self, tool: str, kind: str, kwargs: dict[str, Any]) -> None:
-        if _holds_mask(kwargs):
+        if _holds_mask(kwargs, self._policy.mask_pattern_fields):
             await self._audit(tool, kind, kwargs, "refused", 0.0)
             raise ToolError(
-                f"{tool} was not run: an argument is the placeholder {MASK!r}, which stands in for a "
-                "hidden value. Pass only the fields you mean to change."
+                f"{tool} was not run: an argument is, or contains, the placeholder {MASK!r}, which stands in "
+                "for a hidden value. Pass only the fields you mean to change, with their real text."
             )
 
     async def _call(self, tool: str, kind: str, fn: Callable, kwargs: dict[str, Any]) -> Any:
@@ -458,7 +533,7 @@ class Guardrails:
             await self._audit(tool, kind, kwargs, "error", time.perf_counter() - started)
             raise
         await self._audit(tool, kind, kwargs, "ok", time.perf_counter() - started)
-        return mask(result, self._policy.mask_fields)
+        return self._policy.mask(result)
 
     async def _audit(self, tool: str, kind: str, arguments: dict[str, Any], outcome: str, seconds: float) -> None:
         path = self._policy.audit_path
@@ -470,9 +545,7 @@ class Guardrails:
             "kind": kind,
             "outcome": outcome,
             "duration_ms": round(seconds * 1000, 1),
-            "arguments": mask(
-                {k: v for k, v in arguments.items() if not isinstance(v, Context)}, self._policy.mask_fields
-            ),
+            "arguments": self._policy.mask({k: v for k, v in arguments.items() if not isinstance(v, Context)}),
         }
         token = get_access_token()
         if token is not None:

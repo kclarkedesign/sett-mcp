@@ -31,7 +31,7 @@ Connecting an AI assistant to a real system is easy. Being comfortable leaving i
 | **Write gate** | Write tools aren't registered unless `<PREFIX>_ENABLE_WRITES=true`. The model can't call what it can't see. The policy file can't flip this; only whoever runs the server can. |
 | **Confirmations** | Destructive tools ask the user first ("Permanently delete contact c001?"), using multi-round-trip requests on the 2026-07-28 protocol and elicitation on older ones. Clients that can't show a prompt are refused, not waved through. See [client support](#client-support). |
 | **Allow / deny lists** | Tools the policy excludes are never registered. |
-| **Field masking** | `email`, `phone` or any field you list becomes `[masked]` before results reach the model or the audit log. A write that passes `[masked]` back is refused, so the placeholder can't overwrite real data. |
+| **Field masking** | `email`, `phone` or any field you list becomes `[masked]` before results reach the model or the audit log. Optionally, email addresses and phone numbers typed into free-text fields you name are hidden in place ("Call me at [masked]"). A write that passes `[masked]` back is refused, so the placeholder can't overwrite real data. |
 | **Audit log** | One JSON line per call: tool, kind, outcome, duration, masked arguments, and the client's name and version, so you can see which clients people use and which can't show confirmation prompts. |
 | **Tool hints** | Every tool is marked read-only or destructive so clients can warn users. |
 | **Strict policy file** | Unknown keys fail at startup, so a typo can't silently turn masking off. |
